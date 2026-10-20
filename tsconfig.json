@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "esModuleInterop": true,
+    "noEmit": true,
+    "lib": ["ES2020", "dom"],
+    "module": "commonjs",
+    "target": "ES2020",
+    "jsx": "react",
+    "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "report-table-js": ["viz-report-table/src/report_table.js"],
+      "report-table-react": ["viz-report-table/packages/report-table-react/index.tsx"],
+      "report-table-extension/*": ["viz-report-table/packages/report-table-extension/*"]
+    }
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "tmp", "dist"]
+}

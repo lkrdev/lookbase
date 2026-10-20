@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "long-metrics-table": {
+      "source": "lkrdev/examples",
+      "sourceType": "github",
+      "skillPath": "long-metrics-table/.agents/skills/long-metrics-table/SKILL.md",
+      "computedHash": "9799af637aac7fe367fa8c733234eb4a33c71b0ea9de7b34885177eaa420d1ce"
+    }
+  }
+}

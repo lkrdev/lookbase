@@ -1,0 +1,88 @@
+{
+  "model": "lookbase",
+  "explore": "long_metrics",
+  "base_pdt_view": "long_metrics_base",
+  "field_discovery": {
+    "mode": "all_except_excluded",
+    "exclude_tag": "lookbase:exclude",
+    "include_tag": "lookbase:include"
+  },
+  "measure_pdt_views": {
+    "Total Sale Price": "stacked_total_sale_price",
+    "Total Gross Margin": "stacked_total_gross_margin"
+  },
+  "initial_state": {
+    "timeframe": "ytd",
+    "source": "Daily Actual",
+    "year": "ALL",
+    "selected_outline_member_id": "ALL",
+    "expanded_member_ids": ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"],
+    "expanded_paths": ["All Products", "All Products|Men"],
+    "show_left_metrics_pane": true,
+    "show_tour_for_new_users": true
+  },
+  "quick_start_actions": [
+    {
+      "id": "qs_search_margin",
+      "label": "1. Search Left-Hand Metric Autocomplete (\"margin\")",
+      "params": {
+        "pane": true,
+        "q": "margin"
+      }
+    },
+    {
+      "id": "qs_expand_men_women",
+      "label": "2. Expand Men & Women Hierarchy Branches",
+      "params": {
+        "expanded": ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"]
+      }
+    },
+    {
+      "id": "qs_open_hierarchy_modal",
+      "label": "3. Open Recursive CTE Hierarchy Filter",
+      "params": {
+        "modal": "hierarchy"
+      }
+    }
+  ],
+  "two_pass_metrics": [
+    {
+      "id": "gm_pct",
+      "label": "Gross Margin %",
+      "solve_order": 2,
+      "formula": "MEMBER('Total Gross Margin') / NULLIF(MEMBER('Total Sale Price'), 0)",
+      "format": "0.0%"
+    },
+    {
+      "id": "pct_of_parent",
+      "label": "% of Parent Sales",
+      "solve_order": 2,
+      "formula": "MEMBER('Total Sale Price') / NULLIF(PARENTVAL('Total Sale Price'), 0)",
+      "format": "0.0%"
+    }
+  ],
+  "column_calcs": [
+    {
+      "id": "yoy_var",
+      "label": "YoY Var $",
+      "solve_order": 3,
+      "formula": "VAR('Current', 'Last Year')",
+      "format": "+$#,##0;($#,##0);$0"
+    },
+    {
+      "id": "yoy_var_pct",
+      "label": "YoY Var %",
+      "solve_order": 3,
+      "formula": "VARPER('Current', 'Last Year')",
+      "format": "+0.0%;-0.0%;0.0%"
+    }
+  ],
+  "pinned_rows": [
+    {
+      "id": "men_ytd_benchmark",
+      "label": "Men's YTD Sales (GetValue)",
+      "formula": "GETVALUE('long_metrics.total_sale_price', 'Current', 'ytd', 'dim_product_hierarchy.member_id=DEPT:Men')",
+      "format": "$#,##0"
+    }
+  ]
+}

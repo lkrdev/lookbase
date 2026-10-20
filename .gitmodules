@@ -1,0 +1,3 @@
+[submodule "viz-report-table"]
+	path = viz-report-table
+	url = https://github.com/lkrdev/viz-report-table-marketplace2

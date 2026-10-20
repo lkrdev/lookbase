@@ -1,0 +1,691 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.lookbase-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100vh;
+  min-height: 100%;
+  font-family: "Calibri", "Segoe UI", Arial, sans-serif;
+  font-size: 12px;
+  color: #1f2937;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.lookbase-ribbon {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  background: #f3f6fb;
+  border-bottom: 1px solid #c5d0e6;
+  flex-shrink: 0;
+}
+
+.lookbase-ribbon-left,
+.lookbase-ribbon-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lookbase-brand {
+  font-weight: 700;
+  color: #1e3a8a;
+  letter-spacing: 0.2px;
+  padding-right: 6px;
+  border-right: 1px solid #cbd5e1;
+}
+
+.lookbase-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1e3a8a;
+  background: #d9e1f2;
+  border: 1px solid #8ea9db;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.lookbase-btn:hover {
+  background: #b4c6e7;
+}
+
+.lookbase-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.lookbase-btn.primary {
+  background: #217346;
+  color: #ffffff;
+  border-color: #185abd;
+}
+
+.lookbase-btn.active-toggle {
+  background: #1e3a8a;
+  color: #ffffff;
+  border-color: #1e3a8a;
+}
+
+.lookbase-formula-bar {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  background: #ffffff;
+  border-bottom: 1px solid #d0d7e5;
+  flex-shrink: 0;
+}
+
+.lookbase-cell-coord {
+  width: 68px;
+  text-align: center;
+  font-weight: 600;
+  color: #334155;
+  border-right: 1px solid #d0d7e5;
+  line-height: 26px;
+  background: #f8fafc;
+}
+
+.lookbase-fx-badge {
+  width: 32px;
+  text-align: center;
+  font-style: italic;
+  font-weight: 700;
+  color: #217346;
+  border-right: 1px solid #d0d7e5;
+  line-height: 26px;
+  background: #f8fafc;
+}
+
+.lookbase-formula-input {
+  flex: 1;
+  height: 100%;
+  border: none;
+  padding: 0 8px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 12px;
+  color: #0f172a;
+  outline: none;
+}
+
+.lookbase-pov-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1e3a8a;
+  margin-right: 4px;
+}
+
+.lookbase-pov-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #d9e1f2;
+  border: 1px solid #8ea9db;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.lookbase-pov-cell select {
+  background: transparent;
+  border: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0f172a;
+  cursor: pointer;
+  outline: none;
+}
+
+/* Main workspace split: Left-Hand Side Metrics/Calculations Autocomplete + Right Outline Grid */
+.lookbase-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lookbase-left-metrics-pane {
+  width: 440px;
+  min-width: 340px;
+  max-width: 55%;
+  height: 100%;
+  border-right: 2px solid #8ea9db;
+  background: #f8fafd;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.lookbase-left-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px;
+  background: #c5d9f1;
+  border-bottom: 1px solid #8ea9db;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.lookbase-autocomplete-wrap {
+  position: relative;
+  padding: 6px 8px;
+  background: #eef2f9;
+  border-bottom: 1px solid #b4c6e7;
+}
+
+.lookbase-autocomplete-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid #217346;
+  border-radius: 2px;
+  background: #ffffff;
+  color: #0f172a;
+  outline: none;
+}
+
+.lookbase-autocomplete-input:focus {
+  box-shadow: 0 0 0 2px rgba(33, 115, 70, 0.2);
+}
+
+.lookbase-autocomplete-dropdown {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 8px;
+  right: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: #ffffff;
+  border: 1px solid #217346;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.16);
+  z-index: 50;
+}
+
+.lookbase-autocomplete-option {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  box-sizing: border-box;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e2e8f0;
+  cursor: pointer;
+}
+
+.lookbase-autocomplete-option:hover,
+.lookbase-autocomplete-option.highlighted {
+  background: #e6f4ea;
+}
+
+.lookbase-autocomplete-option-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.lookbase-autocomplete-option-label {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.lookbase-cat-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 2px;
+  text-transform: uppercase;
+}
+
+.lookbase-cat-badge.measure {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.lookbase-cat-badge.two_pass_calc {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.lookbase-cat-badge.column_calc {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.lookbase-cat-badge.member {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+.lookbase-cat-badge.custom_formula {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.lookbase-autocomplete-option-desc {
+  font-size: 10px;
+  color: #475569;
+  font-family: "Consolas", "Courier New", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lookbase-left-metrics-table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+
+.lookbase-left-metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.lookbase-left-metrics-table th {
+  background: #c5d9f1;
+  color: #0f172a;
+  border: 1px solid #8ea9db;
+  padding: 4px 6px;
+  text-align: right;
+  font-weight: 700;
+  position: sticky;
+  top: 0;
+}
+
+.lookbase-left-metrics-table th:first-child {
+  text-align: left;
+}
+
+.lookbase-left-metrics-table td {
+  border: 1px solid #cbd5e1;
+  padding: 4px 6px;
+  background: #ffffff;
+  text-align: right;
+}
+
+.lookbase-left-metrics-table td.metric-row-header {
+  background: #d9e1f2;
+  font-weight: 600;
+  text-align: left;
+  color: #0f172a;
+  cursor: pointer;
+}
+
+.lookbase-left-metrics-table tr.active-metric-row td {
+  background: #f0fdf4;
+}
+
+.lookbase-left-metrics-table tr.active-metric-row td.metric-row-header {
+  outline: 2px solid #217346;
+  outline-offset: -2px;
+}
+
+.lookbase-grid-area {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  position: relative;
+  overflow: auto;
+}
+
+.lookbase-grid-area .hidden {
+  display: none;
+}
+
+/* Multidimensional Spreadsheet Styling over viz-report-table (theme: "custom" avoids .singleIndex { padding-left: 15px !important } so inline depth * 16px works for N levels) */
+.lookbase-grid-area #reportTable {
+  border-collapse: collapse !important;
+  table-layout: fixed;
+  font-family: "Calibri", "Segoe UI", Arial, sans-serif !important;
+}
+
+.lookbase-grid-area #reportTable .nonNumeric {
+  text-align: left;
+}
+
+.lookbase-grid-area #reportTable .numeric {
+  text-align: right;
+}
+
+.lookbase-grid-area #reportTable .negative {
+  color: red;
+}
+
+.lookbase-grid-area #reportTable .estimate {
+  color: darkgray !important;
+}
+
+.lookbase-grid-area #reportTable thead th {
+  background-color: #c5d9f1 !important;
+  color: #0f172a !important;
+  border: 1px solid #8ea9db !important;
+  font-weight: 700 !important;
+  padding: 4px 8px !important;
+}
+
+.lookbase-grid-area #reportTable tbody td.dimension {
+  background-color: #d9e1f2 !important;
+  color: #0f172a !important;
+  border: 1px solid #b4c6e7 !important;
+  font-weight: 600 !important;
+}
+
+.lookbase-grid-area #reportTable tbody tr.subtotal td.dimension {
+  background-color: #c5d9f1 !important;
+  font-weight: 700 !important;
+}
+
+.lookbase-grid-area #reportTable tbody td.measure {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #d0d7e5 !important;
+  padding: 4px 8px !important;
+}
+
+.lookbase-grid-area #reportTable tbody tr.subtotal td.measure {
+  background-color: #f2f5fb !important;
+  font-weight: 700 !important;
+  border-top: 1px solid #8ea9db !important;
+  border-bottom: 1px solid #8ea9db !important;
+}
+
+.lookbase-grid-area #reportTable tbody td.lookbase-active-cell {
+  outline: 2px solid #217346 !important;
+  outline-offset: -2px !important;
+  background-color: #f0fdf4 !important;
+}
+
+/* Fix standalone assumptions in viz-report-table:
+   1. #tooltip uses pageX/clientX viewport coords, so anchor it with position: fixed
+   2. #visContainer wraps #reportTable width (fit-content) and .vis-action-btn is position: absolute
+      at compact 18x18 density in the top-right of the table (not fixed in the page header ribbon) */
+.lookbase-grid-area #tooltip {
+  position: fixed !important;
+  z-index: 9999 !important;
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+  border: 1px solid #8ea9db !important;
+  border-radius: 3px !important;
+  box-shadow: 0 3px 8px rgba(15, 23, 42, 0.18) !important;
+}
+
+.lookbase-grid-area #visContainer {
+  width: fit-content !important;
+  max-width: 100% !important;
+}
+
+.lookbase-grid-area .vis-action-btn {
+  position: absolute !important;
+  top: 3px !important;
+  width: 18px !important;
+  height: 18px !important;
+  border-radius: 3px !important;
+  border: 1px solid #6b8bb8 !important;
+  background: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.14) !important;
+  z-index: 40 !important;
+}
+
+.lookbase-grid-area .vis-action-btn:hover {
+  background: #ffffff !important;
+  border-color: #1e40af !important;
+}
+
+.lookbase-grid-area .vis-action-btn svg {
+  width: 11px !important;
+  height: 11px !important;
+}
+
+.lookbase-grid-area #expandAllBtn {
+  right: 4px !important;
+}
+
+.lookbase-grid-area #collapseAllBtn {
+  right: 25px !important;
+}
+
+.lookbase-grid-area #clearSortsBtn,
+.lookbase-grid-area #resetEditsBtn,
+.lookbase-grid-area #toggleSubtotalsBtn,
+.lookbase-grid-area #downloadButton {
+  right: 46px !important;
+}
+
+/* Stacked Bottom-Right Stateful Toasts (lookbase-toasts skill) */
+.lookbase-toast-stack {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 440px;
+  pointer-events: none;
+}
+
+.lookbase-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.lookbase-toast.info {
+  background: #eff6ff;
+  color: #1e3a8a;
+  border: 1px solid #60a5fa;
+}
+
+.lookbase-toast.success {
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #4ade80;
+}
+
+.lookbase-toast.error {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #f87171;
+}
+
+.lookbase-toast-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lookbase-toast-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #93c5fd;
+  border-top-color: #1d4ed8;
+  border-radius: 50%;
+  animation: lookbase-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes lookbase-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.lookbase-toast-close {
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.lookbase-toast-close:hover {
+  opacity: 1;
+}
+
+/* Jagged Hierarchy Recursive CTE Modal */
+.lookbase-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.lookbase-modal {
+  width: 520px;
+  max-height: 80vh;
+  background: #ffffff;
+  border: 1px solid #8ea9db;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.25);
+  display: flex;
+  flex-direction: column;
+  border-radius: 3px;
+}
+
+.lookbase-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #f3f6fb;
+  border-bottom: 1px solid #c5d0e6;
+}
+
+.lookbase-modal-body {
+  padding: 10px 14px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.lookbase-level-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #e0f2fe;
+  color: #0369a1;
+  margin-left: 6px;
+}
+
+/* Interactive Quick-Start Guide Strip */
+.lookbase-quickstart-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  background: linear-gradient(90deg, #eff6ff 0%, #f0fdf4 100%);
+  border-bottom: 1px solid #93c5fd;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.lookbase-quickstart-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lookbase-step-pill-wrap {
+  display: inline-flex;
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #93c5fd;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.lookbase-step-pill-wrap:hover {
+  background: #dbeafe;
+  border-color: #2563eb;
+}
+
+.lookbase-step-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 8px;
+  background: transparent;
+  border: none;
+  color: #1e3a8a;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lookbase-step-pill-dismiss {
+  background: transparent;
+  border: none;
+  border-left: 1px solid #bfdbfe;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.lookbase-step-pill-dismiss:hover {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.lookbase-btn.tour-btn {
+  background: #1d4ed8;
+  color: #ffffff;
+  border-color: #1e40af;
+}
+
+.lookbase-btn.tour-btn:hover {
+  background: #1e40af;
+}
+
+.driver-popover-dismiss-btn {
+  background: transparent !important;
+  color: #64748b !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 3px !important;
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  cursor: pointer !important;
+  text-shadow: none !important;
+  margin-right: 4px !important;
+}
+
+.driver-popover-dismiss-btn:hover {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-color: #94a3b8 !important;
+}
