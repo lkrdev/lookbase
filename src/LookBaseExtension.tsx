@@ -182,7 +182,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     initialUrlState.source || defaultInit.source || "Daily Actual",
   );
   const [povYear, setPovYear] = useState<string>(
-    initialUrlState.year || defaultInit.year || "2025-03",
+    initialUrlState.year || defaultInit.available_years?.[0] || defaultInit.year || "2026-09",
   );
   const [availableYears, setAvailableYears] = useState<string[]>(
     defaultInit.available_years || [
@@ -1554,9 +1554,10 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       const savedYear = prefs.pov?.year;
       const startYear =
         urlState.year ||
-        (savedYear && savedYear.includes("-") ? savedYear : undefined) ||
+        initCfg.available_years?.[0] ||
         initCfg.year ||
-        "2025-03";
+        (savedYear && savedYear.includes("-") ? savedYear : undefined) ||
+        "2026-09";
       const defaultHierarchyId =
         initCfg.default_hierarchy || discoveredHierarchies[0]?.id || "product";
       const startHierarchy =
@@ -1790,8 +1791,20 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               );
               if (months.length > 0) {
                 setAvailableYears(months);
-                if (!urlState.year && (!savedYear || !savedYear.includes("-") || !months.includes(savedYear))) {
+                if (!urlState.year && months[0] !== startYear) {
                   setPovYear(months[0]);
+                  if (!hostQueryResponse && core40SDK) {
+                    loadStandaloneOutline(
+                      startVersion,
+                      startTimeframe,
+                      startSource,
+                      months[0],
+                      startMemberIds,
+                      startHierarchy,
+                      loadedCfg,
+                      startGridMeasures,
+                    );
+                  }
                 }
               }
             }
