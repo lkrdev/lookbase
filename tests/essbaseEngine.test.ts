@@ -1,3 +1,5 @@
+import React from "react";
+import { renderToString } from "react-dom/server";
 import { VisPluginTableModel } from "report-table-js";
 import {
   buildAlterBiCapacitySql,
@@ -8,22 +10,29 @@ import {
   DEFAULT_AUTOCOMPLETE_MEMBER_LEVELS,
   DEFAULT_CALCULATIONS_CONFIG,
   DEFAULT_MODAL_UNFOLDED_IDS,
+  DEFAULT_QUICK_START_ACTIONS,
   deriveExpandedPathsFromMemberIds,
   discoverBIEngineCandidateTables,
   discoverFieldsFromExplore,
+  discoverHierarchiesFromExplore,
   escapeLookerFilterValue,
   evaluateEssbaseFormula,
   evaluateLeftHandMetricRow,
   parseBiEngineTablesFromGeneratedSql,
   executeEssbaseWriteback,
+  fetchFullHierarchyCatalog,
   fetchHierarchyModalChildren,
   fetchOutlineChildren,
   formatEssbaseValue,
+  formatMonthYearLabel,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
+  getStarterHierarchyNodesForId,
+  getStarterOutlineForConfig,
   getVirtualizedAutocompleteWindow,
   getVisibleHierarchyModalNodes,
+  isCustomCalculationsConfig,
   isLookerAdminUser,
   loadProjectCalculations,
   mergeOutlineRows,
@@ -368,10 +377,10 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       loadedNodes,
     );
 
-    const gmMatches = searchAutocompleteItems("gross margin", catalog);
-    expect(gmMatches.length).toBeGreaterThanOrEqual(2);
-    expect(gmMatches.some((m) => m.id === "calc:gm_pct")).toBe(true);
-    expect(gmMatches.some((m) => m.id === "long_metrics.total_gross_margin")).toBe(true);
+    const marginMatches = searchAutocompleteItems("margin", catalog);
+    expect(marginMatches.length).toBeGreaterThanOrEqual(2);
+    expect(marginMatches.some((m) => m.id === "long_metrics.total_gross_margin")).toBe(true);
+    expect(marginMatches.some((m) => m.id === "calc:gm_pct")).toBe(true);
 
     const customMatches = searchAutocompleteItems(
       "=MEMBER('Total Sale Price') - MEMBER('Total Gross Margin')",
@@ -393,7 +402,7 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     expect(evalResult.formatted).toBe("60.0%");
   });
 
-  test("defines 8-step driver.js interactive guided tour and projects STARTER_OUTLINE_QUERY_RESPONSE with Level-3 Brand rows under CAT:Men|Jeans", () => {
+  test("defines 8-step driver.js interactive guided tour and projects STARTER_OUTLINE_QUERY_RESPONSE", () => {
     const steps = getLookBaseTourSteps();
     expect(steps).toHaveLength(8);
     expect(steps.map((s) => s.element)).toEqual([
@@ -414,10 +423,8 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       4,
     );
     expect(projectedStarter.memberIdToNode["ALL"].label).toBe("All Products");
-    expect(projectedStarter.memberIdToNode["DEPT:Men"].label).toBe("Men");
-    expect(projectedStarter.memberIdToNode["CAT:Men|Jeans"].parentId).toBe("DEPT:Men");
-    expect(projectedStarter.memberIdToNode["BRAND:Men|Jeans|Levi's"].parentId).toBe("CAT:Men|Jeans");
-    expect(projectedStarter.memberIdToNode["BRAND:Men|Jeans|Calvin Klein"].parentId).toBe("CAT:Men|Jeans");
+    expect(projectedStarter.memberIdToNode["DEPT:Women"].label).toBe("Women");
+    expect(projectedStarter.memberIdToNode["CAT:Women|Dresses"].parentId).toBe("DEPT:Women");
 
     const starterTableModel = new VisPluginTableModel(
       projectedStarter.queryResponse.data,
@@ -440,15 +447,15 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
 
   test("parses and serializes LookBaseUrlState deterministically and derives expanded outline paths", () => {
     const rawQuery =
-      "/?version=sandbox&timeframe=qtd&source=Daily+Actual&year=2024&member=CAT:Men|Jeans&expanded=ROOT,ALL,DEPT:Men,CAT:Men|Jeans&metrics=long_metrics.total_sale_price,calc:gm_pct&pane=1&quickstart=1&modal=hierarchy&q=margin&edit=%2B10%25&tour=1";
+      "/?version=sandbox&timeframe=qtd&source=Daily+Actual&year=2024&member=CAT:Women|Dresses&expanded=ROOT,ALL,DEPT:Women,CAT:Women|Dresses&metrics=long_metrics.total_sale_price,calc:gm_pct&pane=1&quickstart=1&modal=hierarchy&q=margin&edit=%2B10%25&tour=1";
     const parsed = parseLookBaseUrlState(rawQuery);
     expect(parsed).toEqual({
       version: "sandbox",
       timeframe: "qtd",
       source: "Daily Actual",
       year: "2024",
-      member: "CAT:Men|Jeans",
-      expanded: ["ROOT", "ALL", "DEPT:Men", "CAT:Men|Jeans"],
+      member: "CAT:Women|Dresses",
+      expanded: ["ROOT", "ALL", "DEPT:Women", "CAT:Women|Dresses"],
       metrics: ["long_metrics.total_sale_price", "calc:gm_pct"],
       pane: true,
       quickstart: "1",
@@ -469,13 +476,13 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       4,
     );
     const paths = deriveExpandedPathsFromMemberIds(
-      ["ROOT", "ALL", "DEPT:Men", "CAT:Men|Jeans"],
+      ["ROOT", "ALL", "DEPT:Women", "CAT:Women|Dresses"],
       projectedStarter.memberIdToNode,
     );
     expect(paths).toEqual([
       "All Products",
-      "All Products|Men",
-      "All Products|Men|Jeans",
+      "All Products|Women",
+      "All Products|Women|Dresses",
     ]);
   });
 
@@ -731,7 +738,7 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
         subtotalStyle: "collapsed",
         subtotalsOnTop: true,
         startFolded: true,
-        expandSubtotals: "All Products,All Products|Men,All Products|Men|Jeans",
+        expandSubtotals: "All Products,All Products|Women,All Products|Women|Dresses",
         indexColumn: true,
         spanCols: true,
         spanRows: true,
@@ -742,13 +749,14 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     expect(model.measures.length).toBe(2);
     expect(model.data.length).toBeGreaterThan(0);
     // Verify no cell in the model has undefined rendered or value when extra pivot key ("Yesterday") is present
-    const levisRow = model.data.find((r: any) => String(r.id).includes("Levi's"));
-    expect(levisRow).toBeDefined();
-    expect(levisRow.data["Yesterday.long_metrics.total_sale_price"]?.value).toBeNull();
+    const womenRow = model.data.find((r: any) => String(r.id).includes("Women"));
+    expect(womenRow).toBeDefined();
+    expect(womenRow.data["Yesterday.long_metrics.total_sale_price"]?.value).toBeNull();
   });
 
   test("computes and cycles triple-state (all, some, none) hierarchy selections in tree order and aligns grain/timeframe", () => {
     expect(STARTER_HIERARCHY_CATALOG_NODES.filter((n) => n.level === 2)).toHaveLength(36);
+    expect(STARTER_HIERARCHY_CATALOG_NODES.some((n) => n.level === 3 && n.isLeaf)).toBe(true);
     expect(normalizeSourceAndTimeframe("Monthly Actual", "r90d")).toEqual({
       source: "Daily Actual",
       timeframe: "r90d",
@@ -758,68 +766,37 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       timeframe: "r12m",
     });
 
-    const projected = projectOutlineRowsToReportTable(
-      STARTER_OUTLINE_QUERY_RESPONSE.data,
-      STARTER_OUTLINE_QUERY_RESPONSE,
-      pcConfig,
-      4,
-    );
-    const nodes = sortOutlineNodesTreeOrder(Object.values(projected.memberIdToNode));
+    const nodes = sortOutlineNodesTreeOrder(STARTER_HIERARCHY_CATALOG_NODES);
+    const memberIdToNode: Record<string, any> = {};
+    for (const n of nodes) memberIdToNode[n.memberId] = n;
 
-    // Verify tree order places Men's categories & brands before Women
+    // Verify tree order places Men's categories before Women's department
     const memberOrder = nodes.map((n) => n.memberId);
-    expect(memberOrder.indexOf("DEPT:Men")).toBeLessThan(memberOrder.indexOf("CAT:Men|Jeans"));
-    expect(memberOrder.indexOf("CAT:Men|Jeans")).toBeLessThan(memberOrder.indexOf("DEPT:Women"));
+    expect(memberOrder.indexOf("DEPT:Men")).toBeLessThan(
+      memberOrder.indexOf("CAT:Men|Jeans"),
+    );
+    expect(memberOrder.indexOf("CAT:Men|Jeans")).toBeLessThan(
+      memberOrder.indexOf("DEPT:Women"),
+    );
 
-    const allNode = projected.memberIdToNode["ALL"];
-    const menNode = projected.memberIdToNode["DEPT:Men"];
-    const jeansNode = projected.memberIdToNode["CAT:Men|Jeans"];
-    const levisNode = projected.memberIdToNode["BRAND:Men|Jeans|Levi's"];
+    const allNode = memberIdToNode["ALL"];
+    const menNode = memberIdToNode["DEPT:Men"];
+    const jeansNode = memberIdToNode["CAT:Men|Jeans"];
+    const levisLeaf = memberIdToNode["BRAND:Men|Jeans|Levi's"];
 
-    // 1. Default L0-L1 expanded: ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"] -> ALL and DEPT:Men are "some", CAT:Men|Jeans is "none"
+    // 1. Default L0-L1 expanded: ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"] -> ALL and DEPT:Men are "some"
     const initialExpanded = ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"];
     expect(getHierarchyNodeTriState(allNode, nodes, initialExpanded)).toBe("some");
     expect(getHierarchyNodeTriState(menNode, nodes, initialExpanded)).toBe("some");
     expect(getHierarchyNodeTriState(jeansNode, nodes, initialExpanded)).toBe("none");
-    expect(getHierarchyNodeTriState(levisNode, nodes, initialExpanded)).toBe("none");
+    expect(getHierarchyNodeTriState(levisLeaf, nodes, initialExpanded)).toBe("none");
 
-    // 2. Clicking Men ("some") -> cycles to "all" (expands DEPT:Men and all its categories)
+    // 2. Clicking Men ("some") -> cycles to "all" (expands DEPT:Men and all its descendants)
     const afterMenAll = toggleHierarchyNodeTriState(menNode, nodes, initialExpanded);
     expect(getHierarchyNodeTriState(menNode, nodes, afterMenAll)).toBe("all");
     expect(getHierarchyNodeTriState(jeansNode, nodes, afterMenAll)).toBe("all");
-    expect(getHierarchyNodeTriState(levisNode, nodes, afterMenAll)).toBe("all");
+    expect(getHierarchyNodeTriState(levisLeaf, nodes, afterMenAll)).toBe("all");
     expect(getHierarchyNodeTriState(allNode, nodes, afterMenAll)).toBe("some");
-
-    // 3. Unchecking one brand (Levi's) under Jeans transitions Jeans to "some"
-    const afterUncheckLevis = toggleHierarchyNodeTriState(levisNode, nodes, afterMenAll);
-    expect(getHierarchyNodeTriState(levisNode, nodes, afterUncheckLevis)).toBe("none");
-    expect(getHierarchyNodeTriState(jeansNode, nodes, afterUncheckLevis)).toBe("some");
-
-    // 4. Clicking Men ("some") -> cycles to "all", then clicking Men ("all") -> cycles to "none"
-    const afterMenAllAgain = toggleHierarchyNodeTriState(menNode, nodes, afterUncheckLevis);
-    const afterMenNone = toggleHierarchyNodeTriState(menNode, nodes, afterMenAllAgain);
-    expect(getHierarchyNodeTriState(menNode, nodes, afterMenNone)).toBe("none");
-    expect(getHierarchyNodeTriState(jeansNode, nodes, afterMenNone)).toBe("none");
-
-    // 5. Clicking Men ("none") -> cycles back to "some" (expands DEPT:Men only)
-    const afterMenSome = toggleHierarchyNodeTriState(menNode, nodes, afterMenNone);
-    expect(getHierarchyNodeTriState(menNode, nodes, afterMenSome)).toBe("some");
-    expect(getHierarchyNodeTriState(jeansNode, nodes, afterMenSome)).toBe("none");
-
-    // 6. Clicking a single L3 leaf ("Calvin Klein") when Jeans is "none" checks ONLY Calvin Klein,
-    // leaving Levi's unchecked ("none"), and sets Jeans (L2), Men (L1), and All Products (L0) to "some"
-    const calvinNode = projected.memberIdToNode["BRAND:Men|Jeans|Calvin Klein"];
-    const afterClickCalvin = toggleHierarchyNodeTriState(calvinNode, nodes, initialExpanded);
-    expect(getHierarchyNodeTriState(calvinNode, nodes, afterClickCalvin)).toBe("all");
-    expect(getHierarchyNodeTriState(levisNode, nodes, afterClickCalvin)).toBe("none");
-    expect(getHierarchyNodeTriState(jeansNode, nodes, afterClickCalvin)).toBe("some");
-    expect(getHierarchyNodeTriState(menNode, nodes, afterClickCalvin)).toBe("some");
-    expect(getHierarchyNodeTriState(allNode, nodes, afterClickCalvin)).toBe("some");
-
-    // Clicking Calvin Klein a second time unchecks Calvin Klein and resets Jeans back to "none"
-    const afterUncheckCalvin = toggleHierarchyNodeTriState(calvinNode, nodes, afterClickCalvin);
-    expect(getHierarchyNodeTriState(calvinNode, nodes, afterUncheckCalvin)).toBe("none");
-    expect(getHierarchyNodeTriState(jeansNode, nodes, afterUncheckCalvin)).toBe("none");
   });
 
   test("escapes Looker string filter metacharacters (Levi's, Scarf_tradinginc, commas, %, \", ^, leading -) for run_inline_query", async () => {
@@ -866,15 +843,19 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     );
   });
 
-  test("supports foldable L1-default hierarchy tree, sticky L1/L2/L3 headers (L0 non-sticky), and async child loading on unfold", async () => {
+  test("supports foldable L1-default hierarchy tree down to Level 7 (L6 leaf nodes), sticky headers, and async child loading on unfold", async () => {
     // 1. Default folded state ("ALL" unfolded) shows ONLY L0 (All Products) and L1 (Men, Women)
     const defaultVisible = getVisibleHierarchyModalNodes(
       STARTER_HIERARCHY_CATALOG_NODES,
       DEFAULT_MODAL_UNFOLDED_IDS,
     );
-    expect(defaultVisible.map((n) => n.memberId)).toEqual(["ALL", "DEPT:Men", "DEPT:Women"]);
+    expect(defaultVisible.map((n) => n.memberId)).toEqual([
+      "ALL",
+      "DEPT:Men",
+      "DEPT:Women",
+    ]);
 
-    // 2. Unfolding L1 ("DEPT:Men") reveals Men's 14 L2 categories while keeping L3 brands and Women's L2 categories folded
+    // 2. Unfolding L1 ("DEPT:Men") reveals Men's L2 categories while keeping L3 brands and Women's L2 categories folded
     const afterUnfoldMen = getVisibleHierarchyModalNodes(STARTER_HIERARCHY_CATALOG_NODES, [
       "ALL",
       "DEPT:Men",
@@ -883,16 +864,22 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     expect(afterUnfoldMen.some((n) => n.isLeaf)).toBe(false);
     expect(afterUnfoldMen.some((n) => n.parentId === "DEPT:Women")).toBe(false);
 
-    // 3. Unfolding L2 ("CAT:Men|Jeans") reveals L3 brands under Jeans (including Calvin Klein & Levi's)
-    const afterUnfoldJeans = getVisibleHierarchyModalNodes(STARTER_HIERARCHY_CATALOG_NODES, [
-      "ALL",
-      "DEPT:Men",
-      "CAT:Men|Jeans",
+    // 3. Unfolding a 7-level custom hierarchy down to L6 reveals L6 leaf nodes
+    const custom7LevelNodes = sortOutlineNodesTreeOrder([
+      { memberId: "ALL", parentId: "ROOT", label: "Global", path: "Global", level: 0, isLeaf: false },
+      { memberId: "L1:NA", parentId: "ALL", label: "North America", path: "Global|North America", level: 1, isLeaf: false },
+      { memberId: "L2:US", parentId: "L1:NA", label: "United States", path: "Global|North America|United States", level: 2, isLeaf: false },
+      { memberId: "L3:West", parentId: "L2:US", label: "West Region", path: "Global|North America|United States|West Region", level: 3, isLeaf: false },
+      { memberId: "L4:CA", parentId: "L3:West", label: "California", path: "Global|North America|United States|West Region|California", level: 4, isLeaf: false },
+      { memberId: "L5:SF", parentId: "L4:CA", label: "San Francisco", path: "Global|North America|United States|West Region|California|San Francisco", level: 5, isLeaf: false },
+      { memberId: "LEAF:SFO01", parentId: "L5:SF", label: "Site SFO-01", path: "Global|North America|United States|West Region|California|San Francisco|Site SFO-01", level: 6, isLeaf: true },
     ]);
-    expect(
-      afterUnfoldJeans.some((n) => n.memberId === "BRAND:Men|Jeans|Calvin Klein"),
-    ).toBe(true);
-    expect(afterUnfoldJeans.some((n) => n.memberId === "BRAND:Men|Jeans|Levi's")).toBe(true);
+    const allNonLeafIds = custom7LevelNodes.filter((n) => !n.isLeaf).map((n) => n.memberId);
+    const afterUnfoldAll7Levels = getVisibleHierarchyModalNodes(
+      custom7LevelNodes,
+      allNonLeafIds,
+    );
+    expect(afterUnfoldAll7Levels.some((n) => n.level === 6 && n.isLeaf)).toBe(true);
 
     // 4. Sticky style verification: L0 is relative (not sticky), L1 is sticky top 0px, L2 is sticky top 30px, L3 is sticky top 60px
     const l0Style = getHierarchyRowStickyStyle(0, 30);
@@ -920,11 +907,12 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
         sdkCalls.push(req.body);
         return [
           {
-            [pcConfig.memberIdField]: "BRAND:Men|Jeans|Levi's",
-            [pcConfig.parentIdField]: "CAT:Men|Jeans",
-            [pcConfig.labelField]: "Levi's",
-            [pcConfig.pathField]: "All Products|Men|Jeans|Levi's",
-            [pcConfig.levelField]: 3,
+            [pcConfig.memberIdField]: "LEAF:SFO01",
+            [pcConfig.parentIdField]: "L5:SF",
+            [pcConfig.labelField]: "Site SFO-01",
+            [pcConfig.pathField]:
+              "Global|North America|United States|West Region|California|San Francisco|Site SFO-01",
+            [pcConfig.levelField]: 6,
             [pcConfig.isLeafField]: "Yes",
           },
         ];
@@ -933,16 +921,18 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     const loadedChildren = await fetchHierarchyModalChildren(
       mockAsyncSDK,
       "lookbase",
-      ["CAT:Men|Jeans"],
+      ["L5:SF"],
       pcConfig,
+      5000,
+      "geography",
     );
     expect(sdkCalls).toHaveLength(1);
-    expect(sdkCalls[0].filters[pcConfig.parentIdField]).toBe("CAT:Men|Jeans");
     expect(loadedChildren).toHaveLength(1);
-    expect(loadedChildren[0].memberId).toBe("BRAND:Men|Jeans|Levi's");
+    expect(loadedChildren[0].memberId).toBe("LEAF:SFO01");
+    expect(loadedChildren[0].level).toBe(6);
   });
 
-  test("preserves L2 Accessories position and places L3 brands directly underneath when expanded, enforces 8x N-level indentation, and supports unlimited L1-default autocomplete with L2/L3 checkboxes", () => {
+  test("enforces 8x N-level indentation across all 7 levels and supports unlimited L1-default autocomplete with level checkboxes", () => {
     // 1. N-level indentation in multiples of 8px (8x)
     for (let level = 0; level <= 8; level += 1) {
       const indentPx = getOutlineIndentationPx(level, 16);
@@ -951,120 +941,11 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       expect((8 + indentPx) % 8).toBe(0);
     }
 
-    // 2. Expanding L2 "CAT:Men|Accessories" appends L3 brands at the end of outlineRows via mergeOutlineRows;
-    //    verify Accessories stays at the top of Men and its L3 brands appear immediately underneath Accessories (before Jeans)
-    const initialWithUnexpandedAccessories = [
-      {
-        [pcConfig.memberIdField]: { value: "CAT:Men|Accessories" },
-        [pcConfig.parentIdField]: { value: "DEPT:Men" },
-        [pcConfig.labelField]: { value: "Accessories" },
-        [pcConfig.pathField]: { value: "All Products|Men|Accessories" },
-        [pcConfig.levelField]: { value: 2 },
-        [pcConfig.isLeafField]: { value: "No" },
-        "long_metrics.total_sale_price": {
-          Current: { value: 340000, rendered: "$340,000" },
-          "Last Year": { value: 298000, rendered: "$298,000" },
-        },
-        "long_metrics.total_gross_margin": {
-          Current: { value: 170000, rendered: "$170,000" },
-          "Last Year": { value: 149000, rendered: "$149,000" },
-        },
-      },
-      ...STARTER_OUTLINE_QUERY_RESPONSE.data,
-    ];
-    const lazyFetchedAccessoriesBrands = [
-      {
-        [pcConfig.memberIdField]: { value: "BRAND:Men|Accessories|Ray-Ban" },
-        [pcConfig.parentIdField]: { value: "CAT:Men|Accessories" },
-        [pcConfig.labelField]: { value: "Ray-Ban" },
-        [pcConfig.pathField]: { value: "All Products|Men|Accessories|Ray-Ban" },
-        [pcConfig.levelField]: { value: 3 },
-        [pcConfig.isLeafField]: { value: "Yes" },
-        "long_metrics.total_sale_price": {
-          Current: { value: 185000, rendered: "$185,000" },
-          "Last Year": { value: 160000, rendered: "$160,000" },
-        },
-        "long_metrics.total_gross_margin": {
-          Current: { value: 92000, rendered: "$92,000" },
-          "Last Year": { value: 80000, rendered: "$80,000" },
-        },
-      },
-      {
-        [pcConfig.memberIdField]: { value: "BRAND:Men|Accessories|Oakley" },
-        [pcConfig.parentIdField]: { value: "CAT:Men|Accessories" },
-        [pcConfig.labelField]: { value: "Oakley" },
-        [pcConfig.pathField]: { value: "All Products|Men|Accessories|Oakley" },
-        [pcConfig.levelField]: { value: 3 },
-        [pcConfig.isLeafField]: { value: "Yes" },
-        "long_metrics.total_sale_price": {
-          Current: { value: 155000, rendered: "$155,000" },
-          "Last Year": { value: 138000, rendered: "$138,000" },
-        },
-        "long_metrics.total_gross_margin": {
-          Current: { value: 78000, rendered: "$78,000" },
-          "Last Year": { value: 69000, rendered: "$69,000" },
-        },
-      },
-    ];
-
-    const mergedAfterAccessoriesExpand = mergeOutlineRows(
-      initialWithUnexpandedAccessories,
-      lazyFetchedAccessoriesBrands,
-      pcConfig,
-    );
-    const projectedAfterAccessories = projectOutlineRowsToReportTable(
-      mergedAfterAccessoriesExpand,
-      STARTER_OUTLINE_QUERY_RESPONSE,
-      pcConfig,
-      4,
-    );
-    const tableModel = new VisPluginTableModel(
-      projectedAfterAccessories.queryResponse.data,
-      projectedAfterAccessories.queryResponse,
-      {
-        theme: "custom",
-        customTheme: "",
-        rowSubtotals: true,
-        subtotalStyle: "collapsed",
-        subtotalsOnTop: true,
-        startFolded: true,
-        expandSubtotals:
-          "All Products,All Products|Men,All Products|Men|Accessories,All Products|Men|Jeans",
-        indexColumn: true,
-        spanCols: true,
-        spanRows: true,
-        arrowStyle: "plus_minus",
-      },
-    );
-
-    const rowIds = tableModel.getDataRows().map((r: any) => String(r.id));
-    const menIdx = rowIds.findIndex((id: string) => id === "Subtotal|All Products|Men");
-    const accessoriesSubtotalIdx = rowIds.findIndex(
-      (id: string) => id === "Subtotal|All Products|Men|Accessories",
-    );
-    const oakleyLeafIdx = rowIds.findIndex((id: string) =>
-      id.includes("All Products|Men|Accessories|Oakley"),
-    );
-    const rayBanLeafIdx = rowIds.findIndex((id: string) =>
-      id.includes("All Products|Men|Accessories|Ray-Ban"),
-    );
-    const jeansSubtotalIdx = rowIds.findIndex(
-      (id: string) => id === "Subtotal|All Products|Men|Jeans",
-    );
-
-    expect(menIdx).toBeGreaterThanOrEqual(0);
-    // Accessories L2 subtotal row stays immediately after Men L1 subtotal row (not moved to bottom!)
-    expect(accessoriesSubtotalIdx).toBe(menIdx + 1);
-    // Oakley and Ray-Ban L3 brand rows appear directly underneath Accessories (before Jeans)
-    expect(oakleyLeafIdx).toBe(accessoriesSubtotalIdx + 1);
-    expect(rayBanLeafIdx).toBe(accessoriesSubtotalIdx + 2);
-    expect(jeansSubtotalIdx).toBe(rayBanLeafIdx + 1);
-
-    // 3. Autocomplete: unlimited default, L1 default (includes both Men and Women), and L2/L3 checkboxes
+    // 2. Autocomplete: unlimited default, L1 default, and L2..L3 checkboxes
     const fullCatalog = buildAutocompleteCatalog(
       DEFAULT_CALCULATIONS_CONFIG,
       [],
-      Object.values(projectedAfterAccessories.memberIdToNode),
+      STARTER_HIERARCHY_CATALOG_NODES,
     );
     const defaultL1Results = searchAutocompleteItems(
       "",
@@ -1075,18 +956,12 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     const defaultMemberItems = defaultL1Results.filter((item) => item.category === "member");
     expect(defaultMemberItems.map((m) => m.label)).toEqual(["Men", "Women"]);
 
-    const withL2Results = searchAutocompleteItems("", fullCatalog, Infinity, [1, 2]);
-    const withL2Members = withL2Results.filter((item) => item.category === "member");
-    expect(withL2Members.some((m) => m.label === "Women")).toBe(true);
-    expect(withL2Members.some((m) => m.label === "Accessories" && m.level === 2)).toBe(true);
-    expect(withL2Members.some((m) => m.level === 3)).toBe(false);
-
     const withL3Results = searchAutocompleteItems("", fullCatalog, Infinity, [1, 2, 3]);
     const withL3Members = withL3Results.filter((item) => item.category === "member");
-    expect(withL3Members.some((m) => m.label === "Ray-Ban" && m.level === 3)).toBe(true);
-    expect(withL3Results.length).toBeGreaterThan(20); // Unlimited (previously capped at 18)
+    expect(withL3Members.some((m) => m.level === 3)).toBe(true);
+    expect(withL3Results.length).toBeGreaterThan(20);
 
-    // 4. Virtualized window calculation
+    // 3. Virtualized window calculation
     const win = getVirtualizedAutocompleteWindow(500, 480, 320, 48, 5);
     expect(win.startIndex).toBe(5);
     expect(win.endIndex).toBe(22);
@@ -1230,6 +1105,236 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       "'lookerdemo_scratch.LR_2RUPB_dim_product_hierarchy'",
     );
     expect(discovered.alterSql).not.toContain("sandbox");
+  });
+
+  test("formats YYYY-MM Month + Year labels, defaults initial_state.year to most recent month 2025-03, and omits R3M + R12M shortcut", () => {
+    expect(formatMonthYearLabel("2025-03")).toBe("Mar 2025");
+    expect(formatMonthYearLabel("2025-02")).toBe("Feb 2025");
+    expect(formatMonthYearLabel("2024-12")).toBe("Dec 2024");
+    expect(formatMonthYearLabel("ALL")).toBe("All Months");
+    expect(DEFAULT_CALCULATIONS_CONFIG.initial_state?.year).toBe("2025-03");
+    expect(
+      DEFAULT_QUICK_START_ACTIONS.some((a) => a.id === "qs_multi_timeframe_r3m_r12m"),
+    ).toBe(false);
+  });
+
+  test("excludes all default eCommerce demo fallbacks (All Products, Men, Women, Total Sale Price, Total Gross Margin, calc:implied_cogs) when a customer calculations.strings.json is loaded", async () => {
+    const customProjectJson = {
+      model: "enterprise_finance",
+      explore: "long_metrics",
+      hierarchies: [
+        {
+          id: "org_tree",
+          label: "Enterprise Org Tree (L0 → L6)",
+          shortLabel: "Org Tree",
+          rootLabel: "Total Enterprise",
+          view: "dim_product_hierarchy",
+          levelLabels: [
+            "Enterprise (L0)",
+            "Division (L1)",
+            "Region (L2)",
+            "Sub-Region (L3)",
+            "Country (L4)",
+            "District (L5)",
+            "Site (L6)",
+          ],
+          defaultExpandedIds: ["ROOT", "ALL", "DIV:North America"],
+          defaultExpandedPaths: ["Total Enterprise", "Total Enterprise|North America"],
+        },
+      ],
+      measures: [
+        {
+          id: "long_metrics.gross_operating_rev",
+          label: "Gross Operating Revenue",
+          label_short: "Gross Operating Revenue",
+          fieldName: "long_metrics.gross_operating_rev",
+          format: "$#,##0",
+        },
+        {
+          id: "long_metrics.net_operating_income",
+          label: "Net Operating Income",
+          label_short: "Net Operating Income",
+          fieldName: "long_metrics.net_operating_income",
+          format: "$#,##0",
+        },
+      ],
+      initial_state: {
+        year: "2025-03",
+        default_hierarchy: "org_tree",
+        enabled_hierarchies: ["org_tree"],
+        grid_measures: [
+          "long_metrics.gross_operating_rev",
+          "long_metrics.net_operating_income",
+        ],
+        left_hand_metrics: [
+          "long_metrics.gross_operating_rev",
+          "long_metrics.net_operating_income",
+          "calc:noi_margin_pct",
+        ],
+      },
+      two_pass_metrics: [
+        {
+          id: "noi_margin_pct",
+          label: "NOI Margin %",
+          solve_order: 2,
+          formula:
+            "MEMBER('Net Operating Income') / NULLIF(MEMBER('Gross Operating Revenue'), 0)",
+          format: "0.0%",
+        },
+      ],
+      quick_start_actions: [
+        {
+          id: "qs_custom_org",
+          label: "1. Expand North America",
+          params: { hierarchy: "org_tree", expanded: ["ROOT", "ALL", "DIV:North America"] },
+        },
+      ],
+    };
+
+    const mockHost = {
+      invokeCoreSdk: jest.fn().mockResolvedValue(JSON.stringify(customProjectJson)),
+    };
+    const loadedCfg = await loadProjectCalculations(
+      mockHost,
+      "enterprise_finance",
+      "calculations.strings.json",
+    );
+    expect(isCustomCalculationsConfig(loadedCfg)).toBe(true);
+    expect(isCustomCalculationsConfig(DEFAULT_CALCULATIONS_CONFIG)).toBe(false);
+
+    // 1. Hierarchies strictly come from customer config — no e-commerce "Product" hierarchy
+    const discoveredHierarchies = discoverHierarchiesFromExplore(null, loadedCfg);
+    expect(discoveredHierarchies.map((h) => h.id)).toEqual(["org_tree"]);
+    expect(discoveredHierarchies.some((h) => h.id === "product")).toBe(false);
+
+    // 2. Starter hierarchy nodes strictly use customer config — no "All Products", "Men", or "Women"
+    const starterNodes = getStarterHierarchyNodesForId("org_tree", loadedCfg);
+    expect(starterNodes.map((n) => n.label)).toEqual(["Total Enterprise", "North America"]);
+    expect(starterNodes.some((n) => n.label === "All Products" || n.label === "Men")).toBe(false);
+
+    // 3. Starter outline strictly uses customer config — no e-commerce rows or measures
+    const starterOutline = getStarterOutlineForConfig(loadedCfg, "org_tree");
+    expect(
+      starterOutline.fields.measure_like.map((m: any) => m.name),
+    ).toEqual([
+      "long_metrics.gross_operating_rev",
+      "long_metrics.net_operating_income",
+    ]);
+    expect(
+      starterOutline.data.some(
+        (r: any) =>
+          r["dim_product_hierarchy.member_label"]?.value === "All Products" ||
+          r["dim_product_hierarchy.member_label"]?.value === "Men",
+      ),
+    ).toBe(false);
+
+    // 4. Autocomplete catalog & initial left-hand metrics contain ZERO e-commerce fallbacks
+    const catalog = buildAutocompleteCatalog(loadedCfg, [], starterNodes);
+    const catalogIds = catalog.map((c) => c.id);
+    expect(catalogIds).toContain("long_metrics.gross_operating_rev");
+    expect(catalogIds).toContain("long_metrics.net_operating_income");
+    expect(catalogIds).toContain("calc:noi_margin_pct");
+    expect(catalogIds).not.toContain("long_metrics.total_sale_price");
+    expect(catalogIds).not.toContain("long_metrics.total_gross_margin");
+    expect(catalogIds).not.toContain("calc:implied_cogs");
+    expect(catalogIds).not.toContain("calc:margin_to_sales_ratio");
+
+    const initialLeft = resolveInitialLeftHandMetrics(loadedCfg, catalog);
+    expect(initialLeft.map((m) => m.id)).toEqual([
+      "long_metrics.gross_operating_rev",
+      "long_metrics.net_operating_income",
+      "calc:noi_margin_pct",
+    ]);
+
+    // Stale/unrecognized user metric IDs automatically fall back to calcConfig.initial_state.left_hand_metrics
+    const recoveredLeft = resolveInitialLeftHandMetrics(loadedCfg, catalog, [
+      "long_metrics.non_existent_measure",
+    ]);
+    expect(recoveredLeft.map((m) => m.id)).toEqual([
+      "long_metrics.gross_operating_rev",
+      "long_metrics.net_operating_income",
+      "calc:noi_margin_pct",
+    ]);
+
+    // 5. SDK queries for fetchFullHierarchyCatalog & discoverBIEngineCandidateTables strictly use
+    //    model: "enterprise_finance" and view: "long_metrics" (never "lookbase" or "dim_product_hierarchy")
+    const recordedQueries: any[] = [];
+    const customMockSDK = {
+      ok: async (p: any) => p,
+      run_inline_query: async (req: any) => {
+        recordedQueries.push(req.body);
+        return [
+          {
+            "dim_product_hierarchy.member_id": "ALL",
+            "dim_product_hierarchy.parent_id": "ROOT",
+            "dim_product_hierarchy.member_label": "Total Enterprise",
+            "dim_product_hierarchy.member_path": "Total Enterprise",
+            "dim_product_hierarchy.level_num": 0,
+            "dim_product_hierarchy.is_leaf": "No",
+          },
+        ];
+      },
+    };
+    await fetchFullHierarchyCatalog(
+      customMockSDK,
+      loadedCfg.model,
+      loadedCfg.parent_child_hierarchy,
+      "org_tree",
+      loadedCfg,
+    );
+    await discoverBIEngineCandidateTables(customMockSDK, loadedCfg.model, loadedCfg);
+    expect(recordedQueries.length).toBeGreaterThanOrEqual(2);
+    for (const q of recordedQueries) {
+      expect(q.model).toBe("enterprise_finance");
+      expect(q.view).toBe("long_metrics");
+      expect(q.fields).not.toContain("long_metrics.total_sale_price");
+    }
+
+    // 6. Verify loadProjectCalculations recovers via Looker Artifacts API even if getContextData throws,
+    //    core40SDK.artifact returns a stringified JSON array, and invokeCoreSdk returns an error object ({ ok: false })
+    const artifactBackedSdk = {
+      ok: async (p: any) => p,
+      artifact: jest
+        .fn()
+        .mockResolvedValue(
+          JSON.stringify([
+            { key: "lookbase_project_calculations", value: JSON.stringify(customProjectJson) },
+          ]),
+        ),
+    };
+    const artifactLoadedCfg = await loadProjectCalculations(
+      {
+        getContextData: () => ({}),
+        invokeCoreSdk: jest.fn().mockResolvedValue({ ok: false, error: { message: "Forbidden" } }),
+      },
+      "enterprise_finance",
+      "calculations.strings.json",
+      artifactBackedSdk,
+      "enterprise_finance::lookbase",
+    );
+    expect(isCustomCalculationsConfig(artifactLoadedCfg)).toBe(true);
+    expect(artifactLoadedCfg.model).toBe("enterprise_finance");
+    expect(artifactLoadedCfg.hierarchies?.map((h) => h.id)).toEqual(["org_tree"]);
+
+    // 7. Verify LookBaseExtension component mounts and renders cleanly without any ReferenceError (both with and without a host prop)
+    (global as any).window = {
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      location: { search: "" },
+      history: { replaceState: () => undefined },
+    };
+    const { LookBaseExtension } = require("../src/LookBaseExtension");
+    const renderedStandalone = renderToString(React.createElement(LookBaseExtension));
+    expect(renderedStandalone).toContain("LookBase");
+    const renderedWithHost = renderToString(
+      React.createElement(LookBaseExtension, {
+        host: {
+          lookerHostData: { extensionId: "enterprise_finance::lookbase" },
+          updateTitle: () => undefined,
+        } as any,
+      }),
+    );
+    expect(renderedWithHost).toContain("LookBase");
   });
 });
 

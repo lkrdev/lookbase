@@ -14,6 +14,7 @@ import {
   buildAlterBiCapacitySql,
   buildAutocompleteCatalog,
   buildLookerFilterExpression,
+  BUILTIN_HIERARCHY_CATALOG,
   CalculationsConfig,
   canUserRebuildCube,
   canUserUpdateSettings,
@@ -25,6 +26,7 @@ import {
   deriveExpandedPathsFromMemberIds,
   discoverBIEngineCandidateTables,
   discoverFieldsFromExplore,
+  discoverHierarchiesFromExplore,
   escapeLookerFilterValue,
   evaluateLookBaseFormula,
   evaluateLeftHandMetricRow,
@@ -32,15 +34,23 @@ import {
   fetchFullHierarchyCatalog,
   fetchHierarchyModalChildren,
   formatLookBaseValue,
+  formatMonthYearLabel,
+  formatTimeframeLabel,
+  formatTimeframeShortLabel,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
+  getStarterHierarchyNodesForId,
+  getStarterOutlineForConfig,
   getVirtualizedAutocompleteWindow,
   getVisibleHierarchyModalNodes,
+  isCustomCalculationsConfig,
   isLookerAdminUser,
   loadProjectCalculations,
   LOOKBASE_SHARED_PDT_CATALOG,
+  LOOKBASE_TIMEFRAME_OPTIONS,
   LookBaseCurrentUser,
+  LookBaseHierarchyDef,
   LookBaseSettingsConfig,
   LookBaseUrlState,
   mergeOutlineRows,
@@ -62,6 +72,7 @@ import {
   STARTER_OUTLINE_QUERY_RESPONSE,
   toggleHierarchyNodeTriState,
   validateLookBaseSettings,
+  withSdkTimeout,
 } from "./essbaseEngine";
 import {
   DEFAULT_ARTIFACT_NAMESPACE,
@@ -125,23 +136,39 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [],
   );
 
-  // Initialize immediately with STARTER_OUTLINE_QUERY_RESPONSE so the grid is interactive on first render
-  const [outlineRows, setOutlineRows] = useState<Record<string, any>[]>(
-    STARTER_OUTLINE_QUERY_RESPONSE.data,
+  // Initialize immediately with STARTER_OUTLINE_QUERY_RESPONSE only when running in standalone/test mode (`host` provided);
+  // when running inside a live Looker iframe (`!host`), wait for `loadProjectCalculations` so customer projects never flash default eCommerce nodes
+  const [outlineRows, setOutlineRows] = useState<Record<string, any>[]>(() =>
+    host ? STARTER_OUTLINE_QUERY_RESPONSE.data : [],
   );
   const [standaloneQueryResponse, setStandaloneQueryResponse] = useState<QueryResponse | undefined>(
-    STARTER_OUTLINE_QUERY_RESPONSE as QueryResponse,
+    () => (host ? (STARTER_OUTLINE_QUERY_RESPONSE as QueryResponse) : undefined),
   );
   const [savedExpandedMemberIds, setSavedExpandedMemberIds] = useState<string[]>(
     initialUrlState.expanded?.length
       ? initialUrlState.expanded
-      : defaultInit.expanded_member_ids || ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"],
+      : host
+        ? defaultInit.expanded_member_ids || ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"]
+        : ["ROOT", "ALL"],
   );
   const [expandedPaths, setExpandedPaths] = useState<string[]>(
-    defaultInit.expanded_paths || ["All Products", "All Products|Men"],
+    host ? defaultInit.expanded_paths || ["All Products", "All Products|Men"] : [],
   );
   const fetchedMemberIdsRef = useRef<Set<string>>(
-    new Set(["ROOT", "ALL", "DEPT:Men", "DEPT:Women", "CAT:Men|Jeans", "CAT:Men|Outerwear & Coats", "CAT:Women|Dresses", "CAT:Women|Active"]),
+    new Set(
+      host
+        ? [
+            "ROOT",
+            "ALL",
+            "DEPT:Men",
+            "DEPT:Women",
+            "CAT:Men|Jeans",
+            "CAT:Men|Outerwear & Coats",
+            "CAT:Women|Dresses",
+            "CAT:Women|Active",
+          ]
+        : ["ROOT", "ALL"],
+    ),
   );
 
   // POV slice state initialized from URL query params -> lookbase.config.json initial_state
@@ -155,18 +182,24 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     initialUrlState.source || defaultInit.source || "Daily Actual",
   );
   const [povYear, setPovYear] = useState<string>(
-    initialUrlState.year || defaultInit.year || "ALL",
+    initialUrlState.year || defaultInit.year || "2025-03",
   );
-  const [availableYears, setAvailableYears] = useState<string[]>([
-    "2026",
-    "2025",
-    "2024",
-    "2023",
-    "2022",
-    "2021",
-    "2020",
-    "2019",
-  ]);
+  const [availableYears, setAvailableYears] = useState<string[]>(
+    defaultInit.available_years || [
+      "2025-03",
+      "2025-02",
+      "2025-01",
+      "2024-12",
+      "2024-11",
+      "2024-10",
+      "2024-09",
+      "2024-08",
+      "2024-07",
+      "2024-06",
+      "2024-05",
+      "2024-04",
+    ],
+  );
 
   // Quick-Start Guide & Tour state (persisted in Looker Artifacts API per logged-in user, overridable via URL)
   const [showQuickStartBar, setShowQuickStartBar] = useState<boolean>(
@@ -206,20 +239,62 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     defaultInit.left_hand_metrics?.[0] || "long_metrics.total_sale_price",
   );
   const [leftMetricRows, setLeftMetricRows] = useState<AutocompleteItem[]>(() =>
-    resolveInitialLeftHandMetrics(
-      DEFAULT_CALCULATIONS_CONFIG,
-      buildAutocompleteCatalog(DEFAULT_CALCULATIONS_CONFIG),
-      initialUrlState.metrics,
-    ),
+    host
+      ? resolveInitialLeftHandMetrics(
+          DEFAULT_CALCULATIONS_CONFIG,
+          buildAutocompleteCatalog(DEFAULT_CALCULATIONS_CONFIG),
+          initialUrlState.metrics,
+        )
+      : [],
   );
 
-  // Jagged Hierarchy Subtree Modal state (defaults to folded L1: only "ALL" unfolded so L1 Men & Women are visible)
+  // Hierarchy Selector & Multi-Timeframe POV state
+  const [availableHierarchies, setAvailableHierarchies] = useState<LookBaseHierarchyDef[]>(() =>
+    host ? BUILTIN_HIERARCHY_CATALOG : [],
+  );
+  const [enabledHierarchyIds, setEnabledHierarchyIds] = useState<string[]>(() =>
+    host
+      ? defaultInit.enabled_hierarchies || [
+          BUILTIN_HIERARCHY_CATALOG[0]?.id || "product",
+        ]
+      : [],
+  );
+  const [activeHierarchyId, setActiveHierarchyId] = useState<string>(
+    initialUrlState.hierarchy ||
+      defaultInit.default_hierarchy ||
+      BUILTIN_HIERARCHY_CATALOG[0]?.id ||
+      "product",
+  );
+  const [exploreHierarchyToAdd, setExploreHierarchyToAdd] = useState<string>(
+    BUILTIN_HIERARCHY_CATALOG[1]?.id || "department",
+  );
+  const [isTimeframeDropdownOpen, setIsTimeframeDropdownOpen] = useState<boolean>(false);
+  const [isMeasuresDropdownOpen, setIsMeasuresDropdownOpen] = useState<boolean>(false);
+  const [selectedGridMeasureIds, setSelectedGridMeasureIds] = useState<string[]>(() =>
+    host
+      ? defaultInit.grid_measures || [
+          "long_metrics.total_sale_price",
+          "long_metrics.total_gross_margin",
+          "long_metrics.gross_margin_percentage",
+        ]
+      : [],
+  );
+  const [leftPaneTimeframe, setLeftPaneTimeframe] = useState<string>("");
+
+  // Jagged Hierarchy Subtree Modal state (defaults to folded L1: only "ALL" unfolded so L1 branches are visible)
   const [isHierarchyModalOpen, setIsHierarchyModalOpen] = useState<boolean>(
     initialUrlState.modal === "hierarchy",
   );
   const [hierarchyFilterSearch, setHierarchyFilterSearch] = useState<string>("");
-  const [hierarchyCatalogNodes, setHierarchyCatalogNodes] = useState<OutlineNodeMeta[]>(
-    STARTER_HIERARCHY_CATALOG_NODES,
+  const [hierarchyCatalogNodes, setHierarchyCatalogNodes] = useState<OutlineNodeMeta[]>(() =>
+    host
+      ? getStarterHierarchyNodesForId(
+          initialUrlState.hierarchy ||
+            defaultInit.default_hierarchy ||
+            BUILTIN_HIERARCHY_CATALOG[0]?.id ||
+            "product",
+        )
+      : [],
   );
   const [modalUnfoldedIds, setModalUnfoldedIds] = useState<string[]>(
     DEFAULT_MODAL_UNFOLDED_IDS,
@@ -283,8 +358,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   } | null>(
     initialUrlState.edit
       ? {
-          memberId: initialUrlState.member || "DEPT:Men",
-          path: "All Products|Men",
+          memberId: initialUrlState.member || "DEPT:Women",
+          path: "All Products|Women",
           metric: "Total Sale Price",
           period: "Current",
           currentValue: 942100,
@@ -395,7 +470,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   useEffect(() => {
     if (host) return;
     connectExtensionHost({
-      chattyTimeout: -1,
+      chattyTimeout: 30000,
       setInitialRoute: (route: string) => {
         if (route) setHostRoute(route);
       },
@@ -424,6 +499,128 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   const visualizationSDK = activeHost?.visualizationSDK;
   const artifactNamespace =
     activeHost?.lookerHostData?.extensionId || DEFAULT_ARTIFACT_NAMESPACE;
+  const hostProjectId = useMemo(
+    () =>
+      activeHost?.lookerHostData?.extensionId?.split("::")?.[0] ||
+      DEFAULT_CALCULATIONS_CONFIG.model ||
+      "lookbase",
+    [activeHost],
+  );
+  const resolveEffectiveModel = useCallback(
+    (cfg: CalculationsConfig) =>
+      isCustomCalculationsConfig(cfg)
+        ? cfg.model || hostProjectId
+        : hostProjectId !== "lookbase"
+          ? hostProjectId
+          : cfg.model || "lookbase",
+    [hostProjectId],
+  );
+  const effectiveModelName = useMemo(
+    () => resolveEffectiveModel(calcConfig),
+    [calcConfig, resolveEffectiveModel],
+  );
+  const calcConfigRef = useRef<CalculationsConfig>(calcConfig);
+  calcConfigRef.current = calcConfig;
+  const effectiveModelRef = useRef<string>(effectiveModelName);
+  effectiveModelRef.current = effectiveModelName;
+  const configLoadedRef = useRef<boolean>(Boolean(host));
+
+  const effectiveAvailableHierarchies = useMemo(() => {
+    if (availableHierarchies.length > 0) return availableHierarchies;
+    const fromCfg = discoverHierarchiesFromExplore(null, calcConfig);
+    if (fromCfg.length > 0) return fromCfg;
+    return hostProjectId === "lookbase" ? BUILTIN_HIERARCHY_CATALOG : [];
+  }, [availableHierarchies, calcConfig, hostProjectId]);
+
+  const effectiveEnabledHierarchyIds = useMemo(() => {
+    const validEnabled = enabledHierarchyIds.filter((id) =>
+      effectiveAvailableHierarchies.some((h) => h.id === id),
+    );
+    if (validEnabled.length > 0) return validEnabled;
+    if (effectiveAvailableHierarchies.length > 0) {
+      const defH =
+        calcConfig.initial_state?.default_hierarchy || effectiveAvailableHierarchies[0].id;
+      const fromInit = calcConfig.initial_state?.enabled_hierarchies?.filter((id) =>
+        effectiveAvailableHierarchies.some((h) => h.id === id),
+      );
+      return fromInit?.length
+        ? Array.from(new Set([...fromInit, defH]))
+        : effectiveAvailableHierarchies.slice(0, 2).map((h) => h.id);
+    }
+    return enabledHierarchyIds;
+  }, [enabledHierarchyIds, effectiveAvailableHierarchies, calcConfig]);
+
+  const effectiveActiveHierarchyId = useMemo(() => {
+    if (effectiveAvailableHierarchies.some((h) => h.id === activeHierarchyId)) {
+      return activeHierarchyId;
+    }
+    return (
+      calcConfig.initial_state?.default_hierarchy ||
+      effectiveAvailableHierarchies[0]?.id ||
+      activeHierarchyId
+    );
+  }, [effectiveAvailableHierarchies, activeHierarchyId, calcConfig]);
+
+  const activeHierarchyDef = useMemo(
+    () =>
+      effectiveAvailableHierarchies.find((h) => h.id === effectiveActiveHierarchyId) ||
+      effectiveAvailableHierarchies[0] ||
+      BUILTIN_HIERARCHY_CATALOG[0],
+    [effectiveAvailableHierarchies, effectiveActiveHierarchyId],
+  );
+
+  const availableGridMeasures = useMemo<LookBaseMeasureDef[]>(() => {
+    if (Array.isArray(calcConfig.measures) && calcConfig.measures.length > 0) {
+      return calcConfig.measures;
+    }
+    if (hostProjectId !== "lookbase") {
+      return [];
+    }
+    return [
+      {
+        id: "long_metrics.total_sale_price",
+        label: "Total Sale Price",
+        fieldName: "long_metrics.total_sale_price",
+        format: "$#,##0",
+      },
+      {
+        id: "long_metrics.total_gross_margin",
+        label: "Total Gross Margin",
+        fieldName: "long_metrics.total_gross_margin",
+        format: "$#,##0",
+      },
+      {
+        id: "long_metrics.gross_margin_percentage",
+        label: "Gross Margin % (LookML)",
+        fieldName: "long_metrics.gross_margin_percentage",
+        format: "0.0%",
+      },
+    ];
+  }, [calcConfig.measures, hostProjectId]);
+
+  const effectiveSelectedGridMeasureIds = useMemo(() => {
+    const validSelected = selectedGridMeasureIds.filter(
+      (id) =>
+        availableGridMeasures.length === 0 ||
+        availableGridMeasures.some((m) => (m.fieldName || m.id) === id || m.id === id),
+    );
+    if (validSelected.length > 0) return validSelected;
+    if (calcConfig.initial_state?.grid_measures?.length) {
+      return calcConfig.initial_state.grid_measures;
+    }
+    if (availableGridMeasures.length > 0) {
+      return availableGridMeasures.slice(0, 4).map((m) => m.fieldName || m.id);
+    }
+    return hostProjectId === "lookbase"
+      ? [
+          "long_metrics.total_sale_price",
+          "long_metrics.total_gross_margin",
+          "long_metrics.gross_margin_percentage",
+        ]
+      : [];
+  }, [selectedGridMeasureIds, availableGridMeasures, calcConfig.initial_state, hostProjectId]);
+  const selectedGridMeasureIdsRef = useRef<string[]>(effectiveSelectedGridMeasureIds);
+  selectedGridMeasureIdsRef.current = effectiveSelectedGridMeasureIds;
 
   const core40SDK = useMemo(
     () =>
@@ -454,13 +651,20 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     if (!isParentChildMode || !rawQueryResponse) return null;
     const rawRows = outlineRows.length > 0 ? outlineRows : rawQueryResponse.data || [];
     const explicitBrandIds = new Set(
-      savedExpandedMemberIds.filter((id) => id.startsWith("BRAND:")),
+      savedExpandedMemberIds.filter(
+        (id) => id.startsWith("BRAND:") || id.startsWith("HOTEL:"),
+      ),
     );
     const categoriesWithExplicitBrands = new Set(
-      Array.from(explicitBrandIds).map((id) => {
-        const parts = id.slice("BRAND:".length).split("|");
-        return `CAT:${parts[0]}|${parts[1]}`;
-      }),
+      Array.from(explicitBrandIds)
+        .map((id) => {
+          if (id.startsWith("BRAND:")) {
+            const parts = id.slice("BRAND:".length).split("|");
+            return `CAT:${parts[0]}|${parts[1]}`;
+          }
+          return "";
+        })
+        .filter(Boolean),
     );
     const rowsToProject =
       categoriesWithExplicitBrands.size === 0
@@ -477,8 +681,21 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
             }
             return true;
           });
-    return projectOutlineRowsToReportTable(rowsToProject, rawQueryResponse, pcConfig, 4);
-  }, [isParentChildMode, outlineRows, rawQueryResponse, pcConfig, savedExpandedMemberIds]);
+    const totalDepth = Math.max(4, activeHierarchyDef?.levelLabels?.length || 7);
+    return projectOutlineRowsToReportTable(
+      rowsToProject,
+      rawQueryResponse,
+      pcConfig,
+      totalDepth,
+    );
+  }, [
+    isParentChildMode,
+    outlineRows,
+    rawQueryResponse,
+    pcConfig,
+    savedExpandedMemberIds,
+    activeHierarchyDef,
+  ]);
 
   const effectiveQueryResponse: QueryResponse | undefined = useMemo(() => {
     if (projectedOutline) {
@@ -568,14 +785,35 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [debouncedMetricQuery, autocompleteCatalog, autocompleteMemberLevels],
   );
 
+  const selectedTimeframes = useMemo(() => {
+    const parts = String(povTimeframe || "ytd")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return parts.length > 0 ? parts : ["ytd"];
+  }, [povTimeframe]);
+
+  const activeLeftTimeframe = useMemo(() => {
+    if (leftPaneTimeframe && selectedTimeframes.includes(leftPaneTimeframe)) {
+      return leftPaneTimeframe;
+    }
+    return selectedTimeframes[0] || "ytd";
+  }, [leftPaneTimeframe, selectedTimeframes]);
+
   // Sync deterministic URL query string whenever state changes
   const lastSyncedQueryRef = useRef<string>("");
   useEffect(() => {
+    if (!configLoadedRef.current) return;
+    const defaultHierarchyId =
+      calcConfig.initial_state?.default_hierarchy ||
+      availableHierarchies[0]?.id ||
+      "product";
     const qs = serializeLookBaseUrlState({
       version: povVersion,
       timeframe: povTimeframe,
       source: povSource,
       year: povYear,
+      hierarchy: activeHierarchyId !== defaultHierarchyId ? activeHierarchyId : undefined,
       member: selectedOutlineMemberId,
       expanded: savedExpandedMemberIds,
       metrics: leftMetricRows.map((r) => r.id),
@@ -605,6 +843,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     povTimeframe,
     povSource,
     povYear,
+    activeHierarchyId,
     selectedOutlineMemberId,
     savedExpandedMemberIds,
     leftMetricRows,
@@ -667,9 +906,12 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         try {
           const childNodes = await fetchHierarchyModalChildren(
             core40SDK,
-            calcConfig.model || "lookbase",
+            effectiveModelRef.current,
             [node.memberId],
             pcConfig,
+            5000,
+            activeHierarchyId,
+            calcConfigRef.current,
           );
           if (childNodes.length > 0) {
             setHierarchyCatalogNodes((prev) => {
@@ -684,7 +926,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         }
       }
     },
-    [modalUnfoldedIds, allHierarchyNodeMap, core40SDK, calcConfig.model, pcConfig],
+    [modalUnfoldedIds, allHierarchyNodeMap, core40SDK, pcConfig, activeHierarchyId],
   );
 
   // Load initial parent-child outline AND restore all saved expanded branches together on load
@@ -695,14 +937,98 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       sourceOverride = povSource,
       yearOverride = povYear,
       expandedMemberIdsOverride = savedExpandedMemberIds,
+      hierarchyOverride = activeHierarchyId,
+      configOverride?: CalculationsConfig,
+      gridMeasuresOverride?: string[],
     ) => {
       if (!core40SDK) return;
+      let activeCfg = configOverride || calcConfigRef.current;
+      if (
+        !configOverride &&
+        !isCustomCalculationsConfig(activeCfg) &&
+        hostProjectId !== "lookbase"
+      ) {
+        const loaded = await loadProjectCalculations(
+          activeHost,
+          hostProjectId,
+          "calculations.strings.json",
+          core40SDK,
+          artifactNamespace,
+        );
+        if (isCustomCalculationsConfig(loaded)) {
+          activeCfg = loaded;
+          calcConfigRef.current = loaded;
+          effectiveModelRef.current = loaded.model || hostProjectId;
+          setCalcConfig(loaded);
+          const discovered = discoverHierarchiesFromExplore(null, loaded);
+          if (discovered.length > 0) {
+            setAvailableHierarchies(discovered);
+            const defH = loaded.initial_state?.default_hierarchy || discovered[0].id;
+            const enabledH = loaded.initial_state?.enabled_hierarchies?.length
+              ? Array.from(new Set([...loaded.initial_state.enabled_hierarchies, defH]))
+              : discovered.slice(0, 2).map((h) => h.id);
+            setActiveHierarchyId((prev) =>
+              discovered.some((h) => h.id === prev) ? prev : defH,
+            );
+            setEnabledHierarchyIds((prev) =>
+              prev.some((id) => discovered.some((h) => h.id === id)) ? prev : enabledH,
+            );
+            setHierarchyCatalogNodes((prev) =>
+              prev.length > 0 ? prev : getStarterHierarchyNodesForId(defH, loaded),
+            );
+            fetchFullHierarchyCatalog(
+              core40SDK,
+              loaded.model || hostProjectId,
+              loaded.parent_child_hierarchy || pcConfig,
+              defH,
+              loaded,
+            ).then((fullNodes) => {
+              if (fullNodes.length > 0) {
+                setHierarchyCatalogNodes(fullNodes);
+              }
+            });
+          }
+        }
+      }
+      const isCustom = isCustomCalculationsConfig(activeCfg);
+      const activeModel = resolveEffectiveModel(activeCfg);
+      const activeExplore = activeCfg.explore || "long_metrics";
+      const activePcConfig = activeCfg.parent_child_hierarchy || pcConfig;
+      const resolvedHierarchyId =
+        isCustom &&
+        activeCfg.hierarchies?.length &&
+        !activeCfg.hierarchies.some((h) => h.id === hierarchyOverride)
+          ? activeCfg.initial_state?.default_hierarchy || activeCfg.hierarchies[0].id
+          : hierarchyOverride;
       setIsBusy(true);
-      const aligned = normalizeSourceAndTimeframe(sourceOverride, timeframeOverride);
-      const explicitBrandIds = expandedMemberIdsOverride.filter((id) =>
-        id.startsWith("BRAND:"),
+      const tfParts = String(timeframeOverride || "ytd")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const isMultiTimeframe = tfParts.length > 1;
+      const aligned = isMultiTimeframe
+        ? { timeframe: tfParts.join(","), source: sourceOverride }
+        : normalizeSourceAndTimeframe(sourceOverride, tfParts[0] || "ytd");
+
+      const ecommerceLegacyIds = new Set([
+        "DEPT:Men",
+        "DEPT:Women",
+        "CAT:Men|Jeans",
+        "CAT:Men|Outerwear & Coats",
+        "CAT:Men|Active",
+        "CAT:Women|Dresses",
+        "CAT:Women|Outerwear & Coats",
+        "CAT:Women|Sweaters",
+        "CAT:Women|Active",
+      ]);
+      const sanitizedExpandedIds = isCustom
+        ? expandedMemberIdsOverride.filter((id) => !ecommerceLegacyIds.has(id))
+        : expandedMemberIdsOverride;
+
+      const explicitBrandIds = sanitizedExpandedIds.filter(
+        (id) => id.startsWith("BRAND:") || id.startsWith("HOTEL:"),
       );
-      const nonLeafParentIds = expandedMemberIdsOverride.flatMap((id) => {
+      const nonLeafParentIds = sanitizedExpandedIds.flatMap((id) => {
         if (id.startsWith("BRAND:")) {
           const parts = id.slice("BRAND:".length).split("|");
           if (parts.length >= 2) {
@@ -710,12 +1036,15 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           }
           return [];
         }
+        if (id.startsWith("HOTEL:")) {
+          return [];
+        }
         return [id];
       });
       const parentSet = Array.from(new Set(["ROOT", "ALL", ...nonLeafParentIds]));
 
       const toastId = pushToast({
-        message: `Syncing live cube (${parentSet.length} parent branch${parentSet.length === 1 ? "" : "es"} in batch)...`,
+        message: `Syncing live cube (${resolvedHierarchyId} · ${aligned.timeframe} · ${parentSet.length} branch${parentSet.length === 1 ? "" : "es"})...`,
         variant: "info",
         timeoutMs: null,
       });
@@ -724,25 +1053,53 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           "long_metrics.timeframe": aligned.timeframe,
           "long_metrics.source_parameter": aligned.source,
         };
+        if (resolvedHierarchyId) {
+          baseFilters["dim_product_hierarchy.hierarchy_id"] =
+            escapeLookerFilterValue(resolvedHierarchyId);
+        }
         if (yearOverride && yearOverride !== "ALL") {
-          baseFilters["long_metrics.year"] = escapeLookerFilterValue(yearOverride);
+          if (yearOverride.includes("-")) {
+            baseFilters["long_metrics.month"] = escapeLookerFilterValue(yearOverride);
+          } else {
+            baseFilters["long_metrics.year"] = escapeLookerFilterValue(yearOverride);
+          }
         }
 
-        const gridMeasures = calcConfig.initial_state?.grid_measures?.length
-          ? calcConfig.initial_state.grid_measures
-          : [
-              "long_metrics.total_sale_price",
-              "long_metrics.total_gross_margin",
-              "long_metrics.gross_margin_percentage",
-            ];
+        const configuredMeasureSet = new Set(
+          (activeCfg.measures || []).map((m) => m.fieldName || m.id),
+        );
+        const candidateMeasures =
+          gridMeasuresOverride && gridMeasuresOverride.length > 0
+            ? gridMeasuresOverride
+            : selectedGridMeasureIdsRef.current;
+        const validSelectedMeasures = candidateMeasures.filter(
+          (id) => configuredMeasureSet.size === 0 || configuredMeasureSet.has(id),
+        );
+        const gridMeasures =
+          validSelectedMeasures.length > 0
+            ? validSelectedMeasures
+            : activeCfg.initial_state?.grid_measures?.length
+              ? activeCfg.initial_state.grid_measures
+              : activeCfg.measures?.length
+                ? activeCfg.measures.slice(0, 4).map((m) => m.fieldName || m.id)
+                : [
+                    "long_metrics.total_sale_price",
+                    "long_metrics.total_gross_margin",
+                    "long_metrics.gross_margin_percentage",
+                  ];
+
+        const queryPivots = isMultiTimeframe
+          ? ["long_metrics.timeframe", "long_metrics.current_period"]
+          : ["long_metrics.current_period"];
 
         const fields = [
-          pcConfig.memberIdField,
-          pcConfig.parentIdField,
-          pcConfig.labelField,
-          pcConfig.pathField,
-          pcConfig.levelField,
-          pcConfig.isLeafField,
+          activePcConfig.memberIdField,
+          activePcConfig.parentIdField,
+          activePcConfig.labelField,
+          activePcConfig.pathField,
+          activePcConfig.levelField,
+          activePcConfig.isLeafField,
+          ...(isMultiTimeframe ? ["long_metrics.timeframe"] : []),
           "long_metrics.current_period",
           ...gridMeasures,
         ];
@@ -757,16 +1114,17 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           core40SDK.ok(
             core40SDK.run_inline_query({
               result_format: "json_detail",
+              cache: !isMultiTimeframe,
               body: {
-                model: calcConfig.model || "lookbase",
-                view: calcConfig.explore || "long_metrics",
+                model: activeModel,
+                view: activeExplore,
                 fields,
-                pivots: ["long_metrics.current_period"],
+                pivots: queryPivots,
                 filters: {
                   ...baseFilters,
-                  [pcConfig.parentIdField]: firstChunk,
+                  [activePcConfig.parentIdField]: firstChunk,
                 },
-                sorts: [pcConfig.levelField, pcConfig.labelField],
+                sorts: [activePcConfig.levelField, activePcConfig.labelField],
                 limit: "500",
               },
             }),
@@ -775,15 +1133,15 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
             ? restoreSavedOutlineExpansion(
                 core40SDK,
                 {
-                  model: calcConfig.model || "lookbase",
-                  view: calcConfig.explore || "long_metrics",
+                  model: activeModel,
+                  view: activeExplore,
                   fields,
-                  pivots: ["long_metrics.current_period"],
+                  pivots: queryPivots,
                   filters: baseFilters,
-                  sorts: [pcConfig.levelField, pcConfig.labelField],
+                  sorts: [activePcConfig.levelField, activePcConfig.labelField],
                 },
                 parentSet.slice(20),
-                pcConfig,
+                activePcConfig,
                 20,
               )
             : Promise.resolve({ rows: [], fetchedParentIds: parentSet, batchCount: 1 }),
@@ -793,15 +1151,15 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                   core40SDK.run_inline_query({
                     result_format: "json_detail",
                     body: {
-                      model: calcConfig.model || "lookbase",
-                      view: calcConfig.explore || "long_metrics",
+                      model: activeModel,
+                      view: activeExplore,
                       fields,
-                      pivots: ["long_metrics.current_period"],
+                      pivots: queryPivots,
                       filters: {
                         ...baseFilters,
-                        [pcConfig.memberIdField]: explicitBrandsFilter,
+                        [activePcConfig.memberIdField]: explicitBrandsFilter,
                       },
-                      sorts: [pcConfig.levelField, pcConfig.labelField],
+                      sorts: [activePcConfig.levelField, activePcConfig.labelField],
                       limit: "500",
                     },
                   }),
@@ -814,7 +1172,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         const primaryRows = Array.isArray((firstResp as any)?.data) ? (firstResp as any).data : [];
         let allMergedRows =
           restored.rows.length > 0
-            ? mergeOutlineRows(primaryRows, restored.rows, pcConfig)
+            ? mergeOutlineRows(primaryRows, restored.rows, activePcConfig)
             : primaryRows;
 
         if (rawExplicitBrandsResp) {
@@ -823,7 +1181,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
             ? (parsedBrandsResp as any).data
             : [];
           if (brandRows.length > 0) {
-            allMergedRows = mergeOutlineRows(allMergedRows, brandRows, pcConfig);
+            allMergedRows = mergeOutlineRows(allMergedRows, brandRows, activePcConfig);
           }
         }
 
@@ -837,7 +1195,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           fetchedMemberIdsRef.current = new Set(parentSet);
         }
         updateToast(toastId, {
-          message: `Cube synced (${allMergedRows.length} rows across ${parentSet.length} parent branch${parentSet.length === 1 ? "" : "es"}).`,
+          message: `Cube synced (${allMergedRows.length} rows · ${resolvedHierarchyId} · ${aligned.timeframe}).`,
           variant: "success",
           timeoutMs: 3500,
         });
@@ -853,17 +1211,83 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     },
     [
       core40SDK,
-      calcConfig.model,
-      calcConfig.explore,
-      calcConfig.initial_state?.grid_measures,
+      activeHost,
+      hostProjectId,
+      artifactNamespace,
+      resolveEffectiveModel,
       pcConfig,
       povVersion,
       povTimeframe,
       povSource,
       povYear,
       savedExpandedMemberIds,
+      activeHierarchyId,
       pushToast,
       updateToast,
+    ],
+  );
+
+  // Switch active dimensional hierarchy
+  const handleSwitchHierarchy = useCallback(
+    async (nextHierarchyId: string) => {
+      const activeCfg = calcConfigRef.current;
+      const activeModel = resolveEffectiveModel(activeCfg);
+      const targetDef =
+        effectiveAvailableHierarchies.find((h) => h.id === nextHierarchyId) ||
+        effectiveAvailableHierarchies[0] ||
+        BUILTIN_HIERARCHY_CATALOG[0];
+      setActiveHierarchyId(nextHierarchyId);
+      setEnabledHierarchyIds((prev) => {
+        const base = prev.length > 0 ? prev : effectiveEnabledHierarchyIds;
+        return base.includes(nextHierarchyId) ? base : [...base, nextHierarchyId];
+      });
+      setModalUnfoldedIds(["ALL"]);
+      modalFetchedParentsRef.current = new Set(["ROOT", "ALL"]);
+      setSelectedOutlineMemberId("ALL");
+
+      const nextExpandedIds = targetDef.defaultExpandedIds || ["ROOT", "ALL"];
+      const nextExpandedPaths = targetDef.defaultExpandedPaths || [targetDef.rootLabel];
+      setSavedExpandedMemberIds(nextExpandedIds);
+      setExpandedPaths(nextExpandedPaths);
+      persistSavedExpansion(nextExpandedIds, nextExpandedPaths);
+
+      setHierarchyCatalogNodes(getStarterHierarchyNodesForId(nextHierarchyId, activeCfg));
+      if (core40SDK) {
+        fetchFullHierarchyCatalog(
+          core40SDK,
+          activeModel,
+          pcConfig,
+          nextHierarchyId,
+          activeCfg,
+        ).then((nodes) => {
+          if (nodes.length > 0) {
+            setHierarchyCatalogNodes(nodes);
+          }
+        });
+      }
+
+      await loadStandaloneOutline(
+        povVersion,
+        povTimeframe,
+        povSource,
+        povYear,
+        nextExpandedIds,
+        nextHierarchyId,
+        activeCfg,
+      );
+    },
+    [
+      effectiveAvailableHierarchies,
+      effectiveEnabledHierarchyIds,
+      resolveEffectiveModel,
+      persistSavedExpansion,
+      core40SDK,
+      pcConfig,
+      loadStandaloneOutline,
+      povVersion,
+      povTimeframe,
+      povSource,
+      povYear,
     ],
   );
 
@@ -874,11 +1298,16 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       const nextTimeframe = urlPatch.timeframe ?? povTimeframe;
       const nextSource = urlPatch.source ?? povSource;
       const nextYear = urlPatch.year ?? povYear;
+      const nextHierarchy = urlPatch.hierarchy ?? activeHierarchyId;
 
       if (urlPatch.version !== undefined) setPovVersion(urlPatch.version);
       if (urlPatch.timeframe !== undefined) setPovTimeframe(urlPatch.timeframe);
       if (urlPatch.source !== undefined) setPovSource(urlPatch.source);
       if (urlPatch.year !== undefined) setPovYear(urlPatch.year);
+      if (urlPatch.hierarchy !== undefined && urlPatch.hierarchy !== activeHierarchyId) {
+        handleSwitchHierarchy(urlPatch.hierarchy);
+        return;
+      }
 
       if (urlPatch.pane !== undefined) {
         setShowLeftMetricsPane(urlPatch.pane);
@@ -895,19 +1324,32 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         setIsHierarchyModalOpen(urlPatch.modal === "hierarchy");
         setIsSettingsModalOpen(urlPatch.modal === "settings");
       }
+      const primaryMeasureField =
+        calcConfig.measures?.[0]?.fieldName ||
+        calcConfig.measures?.[0]?.id ||
+        "long_metrics.total_sale_price";
+      const primaryMeasureLabel =
+        calcConfig.measures?.[0]?.label || "Total Sale Price";
+      const defaultFirstBranchId =
+        activeHierarchyDef?.defaultExpandedIds?.find((id) => id !== "ROOT" && id !== "ALL") ||
+        "DEPT:Women";
+      const defaultFirstBranchPath =
+        activeHierarchyDef?.defaultExpandedPaths?.find((p) => p.includes("|")) ||
+        `${activeHierarchyDef?.rootLabel || "All Products"}|Women`;
+
       if (urlPatch.member !== undefined) {
         setSelectedOutlineMemberId(urlPatch.member);
         const node = projectedOutline?.memberIdToNode?.[urlPatch.member];
         const salesVal =
-          node?.rawRow?.["long_metrics.total_sale_price"]?.Current?.value ?? 942100;
+          node?.rawRow?.[primaryMeasureField]?.Current?.value ?? 942100;
         setFormulaText(
-          `=GETVALUE("Total Sale Price", "Current", "${nextTimeframe}", "${pcConfig.memberIdField}=${urlPatch.member}")`,
+          `=GETVALUE("${primaryMeasureLabel}", "Current", "${nextTimeframe}", "${pcConfig.memberIdField}=${urlPatch.member}")`,
         );
         if (urlPatch.edit !== undefined || nextVersion === "sandbox") {
           setSelectedCellMeta({
             memberId: urlPatch.member,
-            path: node?.path || "All Products|Men",
-            metric: "Total Sale Price",
+            path: node?.path || defaultFirstBranchPath,
+            metric: primaryMeasureLabel,
             period: "Current",
             currentValue: salesVal,
           });
@@ -916,15 +1358,16 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       if (urlPatch.edit !== undefined) {
         setEditValueInput(urlPatch.edit);
         if (!selectedCellMeta) {
-          const targetMember = urlPatch.member || selectedOutlineMemberId || "DEPT:Men";
+          const targetMember =
+            urlPatch.member || selectedOutlineMemberId || defaultFirstBranchId;
           const node = projectedOutline?.memberIdToNode?.[targetMember];
           setSelectedCellMeta({
             memberId: targetMember,
-            path: node?.path || "All Products|Men",
-            metric: "Total Sale Price",
+            path: node?.path || defaultFirstBranchPath,
+            metric: primaryMeasureLabel,
             period: "Current",
             currentValue:
-              node?.rawRow?.["long_metrics.total_sale_price"]?.Current?.value ?? 942100,
+              node?.rawRow?.[primaryMeasureField]?.Current?.value ?? 942100,
           });
         }
       }
@@ -969,6 +1412,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           nextSource,
           nextYear,
           urlPatch.expanded || savedExpandedMemberIds,
+          nextHierarchy,
         );
       }
     },
@@ -977,6 +1421,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       povTimeframe,
       povSource,
       povYear,
+      activeHierarchyId,
+      handleSwitchHierarchy,
       projectedOutline,
       pcConfig.memberIdField,
       selectedCellMeta,
@@ -998,27 +1444,55 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     let cancelled = false;
 
     (async () => {
-      const [rawCfg, userArtifact, exploreMeta] = await Promise.all([
-        loadProjectCalculations(activeHost, "lookbase", "calculations.strings.json"),
+      const activeProjectId =
+        activeHost?.lookerHostData?.extensionId?.split("::")?.[0] ||
+        DEFAULT_CALCULATIONS_CONFIG.model ||
+        "lookbase";
+      const [rawCfg, userArtifact] = await Promise.all([
+        loadProjectCalculations(
+          activeHost,
+          activeProjectId,
+          "calculations.strings.json",
+          core40SDK,
+          artifactNamespace,
+        ),
         loadUserPrefsArtifact(core40SDK, artifactNamespace),
-        core40SDK && typeof core40SDK.lookml_model_explore === "function"
-          ? core40SDK
-              .ok(
-                core40SDK.lookml_model_explore(
-                  "lookbase",
-                  "long_metrics",
-                  "id,name,fields",
-                ),
-              )
-              .catch(() => null)
-          : Promise.resolve(null),
       ]);
+      if (cancelled) return;
+
+      const exploreMeta =
+        (!isCustomCalculationsConfig(rawCfg) ||
+          (!rawCfg.hierarchies?.length && !rawCfg.measures?.length)) &&
+        core40SDK &&
+        typeof core40SDK.lookml_model_explore === "function"
+          ? await withSdkTimeout(
+              Promise.resolve()
+                .then(() =>
+                  core40SDK.ok(
+                    (core40SDK.lookml_model_explore as any)({
+                      lookml_model_name: activeProjectId,
+                      explore_name: "long_metrics",
+                      fields: "id,name,fields",
+                    }),
+                  ),
+                )
+                .catch(() => null),
+              1500,
+              null,
+            )
+          : null;
       if (cancelled) return;
 
       const loadedCfg = exploreMeta
         ? discoverFieldsFromExplore(exploreMeta, rawCfg)
         : rawCfg;
+      calcConfigRef.current = loadedCfg;
+      effectiveModelRef.current = resolveEffectiveModel(loadedCfg);
       setCalcConfig(loadedCfg);
+      const isCustomConfig = isCustomCalculationsConfig(loadedCfg);
+      const discoveredHierarchies = discoverHierarchiesFromExplore(exploreMeta, loadedCfg);
+      setAvailableHierarchies(discoveredHierarchies);
+
       if (userArtifact.user) {
         setCurrentUser(userArtifact.user);
       }
@@ -1043,24 +1517,58 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         hostRoute || (typeof window !== "undefined" ? window.location.search : ""),
       );
 
-      // Deterministic Precedence: 1. URL Query Parameter -> 2. User Artifact -> 3. lookbase.config.json
+      // Deterministic Precedence: 1. URL Query Parameter -> 2. User Artifact -> 3. calculations.strings.json / lookbase.config.json
       const startVersion = urlState.version || prefs.pov?.version || initCfg.version || "base";
       const rawTimeframe =
         urlState.timeframe || prefs.pov?.timeframe || initCfg.timeframe || "ytd";
       const rawSource =
         urlState.source || prefs.pov?.source || initCfg.source || "Daily Actual";
-      const alignedPov = normalizeSourceAndTimeframe(rawSource, rawTimeframe);
+      const rawTfList = String(rawTimeframe)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const alignedPov =
+        rawTfList.length > 1
+          ? { timeframe: rawTfList.join(","), source: rawSource }
+          : normalizeSourceAndTimeframe(rawSource, rawTimeframe);
       const startTimeframe = alignedPov.timeframe;
       const startSource = alignedPov.source;
-      const startYear = urlState.year || prefs.pov?.year || initCfg.year || "ALL";
+      const savedYear = prefs.pov?.year;
+      const startYear =
+        urlState.year ||
+        (savedYear && savedYear.includes("-") ? savedYear : undefined) ||
+        initCfg.year ||
+        "2025-03";
+      const defaultHierarchyId =
+        initCfg.default_hierarchy || discoveredHierarchies[0]?.id || "product";
+      const startHierarchy =
+        urlState.hierarchy &&
+        discoveredHierarchies.some((h) => h.id === urlState.hierarchy)
+          ? urlState.hierarchy
+          : defaultHierarchyId;
+      const startEnabledHierarchies =
+        initCfg.enabled_hierarchies?.length
+          ? Array.from(new Set([...initCfg.enabled_hierarchies, startHierarchy]))
+          : discoveredHierarchies.slice(0, 2).map((h) => h.id);
+      if (initCfg.available_years?.length) {
+        setAvailableYears(initCfg.available_years);
+      }
       setPovVersion(startVersion);
       setPovTimeframe(startTimeframe);
       setPovSource(startSource);
       setPovYear(startYear);
+      setActiveHierarchyId(startHierarchy);
+      setEnabledHierarchyIds(startEnabledHierarchies);
 
       const startMember =
         urlState.member || initCfg.selected_outline_member_id || "ALL";
       setSelectedOutlineMemberId(startMember);
+      const primaryMeasureLabel =
+        loadedCfg.measures?.[0]?.label ||
+        (isCustomConfig ? "Primary Measure" : "Total Sale Price");
+      setFormulaText(
+        `=GETVALUE("${primaryMeasureLabel}", "Current", "${startTimeframe}", "${startMember}")`,
+      );
 
       if (urlState.pane !== undefined) {
         setShowLeftMetricsPane(urlState.pane);
@@ -1083,29 +1591,119 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         setEditValueInput(urlState.edit);
       }
 
-      // Apply starting expanded hierarchy nodes (URL -> User Artifact -> Project Config)
-      const startMemberIds =
-        urlState.expanded?.length
-          ? urlState.expanded
-          : prefs.savedExpandedMemberIds?.length
-            ? prefs.savedExpandedMemberIds
-            : initCfg.expanded_member_ids || ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"];
+      // Apply starting expanded hierarchy nodes (URL -> User Artifact -> Project Config),
+      // sanitizing any stale e-commerce IDs/paths when `isCustomConfig` is true
+      const startHierarchyDef =
+        discoveredHierarchies.find((h) => h.id === startHierarchy) ||
+        discoveredHierarchies[0] ||
+        BUILTIN_HIERARCHY_CATALOG[0];
+      const ecommerceLegacyIds = new Set([
+        "DEPT:Men",
+        "DEPT:Women",
+        "CAT:Men|Jeans",
+        "CAT:Men|Outerwear & Coats",
+        "CAT:Men|Active",
+        "CAT:Women|Dresses",
+        "CAT:Women|Outerwear & Coats",
+        "CAT:Women|Sweaters",
+        "CAT:Women|Active",
+      ]);
+      const sanitizedUrlExpanded = isCustomConfig
+        ? (urlState.expanded || []).filter((id: string) => !ecommerceLegacyIds.has(id))
+        : urlState.expanded || [];
+      const sanitizedPrefMemberIds = isCustomConfig
+        ? (prefs.savedExpandedMemberIds || []).filter((id: string) => !ecommerceLegacyIds.has(id))
+        : prefs.savedExpandedMemberIds || [];
+      const sanitizedPrefPaths = isCustomConfig
+        ? (prefs.savedExpandedPaths || []).filter(
+            (p: string) => !p.startsWith("All Products"),
+          )
+        : prefs.savedExpandedPaths || [];
+
+      const useUrlExpansion = sanitizedUrlExpanded.length > (isCustomConfig ? 2 : 0);
+      const usePrefExpansion =
+        !useUrlExpansion &&
+        startHierarchy === defaultHierarchyId &&
+        sanitizedPrefMemberIds.length > (isCustomConfig ? 2 : 0) &&
+        sanitizedPrefPaths.length > (isCustomConfig ? 1 : 0);
+
+      const startMemberIds = useUrlExpansion
+        ? sanitizedUrlExpanded
+        : startHierarchy !== defaultHierarchyId
+          ? startHierarchyDef.defaultExpandedIds
+          : usePrefExpansion
+            ? sanitizedPrefMemberIds
+            : initCfg.expanded_member_ids || startHierarchyDef.defaultExpandedIds;
       const startPaths =
-        prefs.savedExpandedPaths?.length && !urlState.expanded?.length
-          ? prefs.savedExpandedPaths
-          : initCfg.expanded_paths || ["All Products", "All Products|Men"];
+        startHierarchy !== defaultHierarchyId
+          ? startHierarchyDef.defaultExpandedPaths
+          : usePrefExpansion
+            ? sanitizedPrefPaths
+            : initCfg.expanded_paths || startHierarchyDef.defaultExpandedPaths;
       setSavedExpandedMemberIds(startMemberIds);
       setExpandedPaths(startPaths);
+      setHierarchyCatalogNodes(getStarterHierarchyNodesForId(startHierarchy, loadedCfg));
 
-      // Apply starting Left-Hand Metrics (URL -> User Artifact -> Project Config)
-      const catalog = buildAutocompleteCatalog(loadedCfg);
-      setLeftMetricRows(
-        resolveInitialLeftHandMetrics(
-          loadedCfg,
-          catalog,
-          urlState.metrics?.length ? urlState.metrics : prefs.leftHandMetricIds,
-        ),
+      // Seed starter outline rows for the resolved config so custom projects never show e-commerce starter rows
+      if (!hostQueryResponse) {
+        const starterOutline = getStarterOutlineForConfig(loadedCfg, startHierarchy);
+        setOutlineRows((prev) =>
+          prev.length === 0 || isCustomConfig ? starterOutline.data : prev,
+        );
+        setStandaloneQueryResponse((prev) =>
+          !prev || isCustomConfig ? (starterOutline as QueryResponse) : prev,
+        );
+      }
+
+      // Apply starting Left-Hand Metrics (URL -> User Artifact -> Project Config),
+      // filtering out any stale e-commerce metric IDs when `isCustomConfig` is true
+      const ecommerceMetricIds = new Set([
+        "long_metrics.total_sale_price",
+        "long_metrics.total_gross_margin",
+        "long_metrics.gross_margin_percentage",
+        "calc:implied_cogs",
+        "calc:margin_to_sales_ratio",
+      ]);
+      const sanitizedUrlMetrics = isCustomConfig
+        ? (urlState.metrics || []).filter((id: string) => !ecommerceMetricIds.has(id))
+        : urlState.metrics;
+      const sanitizedPrefMetrics = isCustomConfig
+        ? (prefs.leftHandMetricIds || []).filter((id: string) => !ecommerceMetricIds.has(id))
+        : prefs.leftHandMetricIds;
+      const validMeasureFieldSet = new Set(
+        (loadedCfg.measures || []).map((m) => m.fieldName || m.id),
       );
+      const savedGridMeasures = (prefs.gridMeasureIds || []).filter(
+        (id: string) =>
+          !ecommerceMetricIds.has(id) &&
+          (validMeasureFieldSet.size === 0 || validMeasureFieldSet.has(id)),
+      );
+      const startGridMeasures =
+        savedGridMeasures.length > 0
+          ? savedGridMeasures
+          : initCfg.grid_measures?.length
+            ? initCfg.grid_measures
+            : (loadedCfg.measures || []).slice(0, 4).map((m) => m.fieldName || m.id);
+      if (startGridMeasures.length > 0) {
+        selectedGridMeasureIdsRef.current = startGridMeasures;
+        setSelectedGridMeasureIds(startGridMeasures);
+      }
+
+      const catalog = buildAutocompleteCatalog(loadedCfg);
+      const resolvedMetrics = resolveInitialLeftHandMetrics(
+        loadedCfg,
+        catalog,
+        sanitizedUrlMetrics?.length
+          ? sanitizedUrlMetrics
+          : sanitizedPrefMetrics?.length
+            ? sanitizedPrefMetrics
+            : undefined,
+      );
+      setLeftMetricRows(resolvedMetrics);
+      if (resolvedMetrics[0]?.id) {
+        setActiveMetricRowId(resolvedMetrics[0].id);
+      }
+      configLoadedRef.current = true;
 
       // Quick-Start Bar & Custom Quick-Start Pills
       if (prefs.customQuickStartActions?.length) {
@@ -1133,29 +1731,32 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       if (core40SDK) {
         fetchFullHierarchyCatalog(
           core40SDK,
-          loadedCfg.model || "lookbase",
+          resolveEffectiveModel(loadedCfg),
           loadedCfg.parent_child_hierarchy || pcConfig,
+          startHierarchy,
+          loadedCfg,
         ).then((fullNodes) => {
           if (!cancelled && fullNodes.length > 0) {
             setHierarchyCatalogNodes(fullNodes);
           }
         });
 
-        // Dynamically discover all available years in long_metrics
+        // Dynamically discover all available months (YYYY-MM) in long_metrics, newest first
         core40SDK
           .ok(
             core40SDK.run_inline_query({
               result_format: "json",
               body: {
-                model: loadedCfg.model || "lookbase",
+                model: resolveEffectiveModel(loadedCfg),
                 view: loadedCfg.explore || "long_metrics",
-                fields: ["long_metrics.year"],
+                fields: ["long_metrics.month"],
                 filters: {
                   [pcConfig.memberIdField]: "ALL",
+                  "dim_product_hierarchy.hierarchy_id": startHierarchy,
                   "long_metrics.timeframe": "current_view",
                   "long_metrics.source_parameter": "Daily Actual",
                 },
-                sorts: ["long_metrics.year desc"],
+                sorts: ["long_metrics.month desc"],
                 limit: "50",
               },
             }),
@@ -1163,20 +1764,23 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           .then((rawYr) => {
             const parsedYr = parseSdkJson(rawYr);
             if (!cancelled && Array.isArray(parsedYr) && parsedYr.length > 0) {
-              const yrs = Array.from(
+              const months = Array.from(
                 new Set(
                   parsedYr
-                    .map((r: any) => String(r?.["long_metrics.year"] ?? ""))
+                    .map((r: any) => String(r?.["long_metrics.month"] ?? ""))
                     .filter(Boolean),
                 ),
               );
-              if (yrs.length > 0) {
-                setAvailableYears(yrs);
+              if (months.length > 0) {
+                setAvailableYears(months);
+                if (!urlState.year && (!savedYear || !savedYear.includes("-") || !months.includes(savedYear))) {
+                  setPovYear(months[0]);
+                }
               }
             }
           })
           .catch(() => {
-            // keep default 2026..2019 years list
+            // keep configured available_years list
           });
       }
 
@@ -1187,6 +1791,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           startSource,
           startYear,
           startMemberIds,
+          startHierarchy,
+          loadedCfg,
+          startGridMeasures,
         );
       }
 
@@ -1231,7 +1838,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     return () => {
       cancelled = true;
     };
-  }, [activeHost, core40SDK, artifactNamespace, hostRoute]);
+  }, [activeHost, core40SDK, artifactNamespace]);
 
   useEffect(() => {
     if (hostQueryResponse?.data?.length) {
@@ -1413,11 +2020,19 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               timeoutMs: null,
             });
             try {
+              const activeCfg = calcConfigRef.current;
+              const activeModel = resolveEffectiveModel(activeCfg);
+              const activeExplore = activeCfg.explore || "long_metrics";
+              const tfParts = String(povTimeframe || "ytd")
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+              const isMultiTf = tfParts.length > 1;
               const restored = await restoreSavedOutlineExpansion(
                 core40SDK,
                 {
-                  model: calcConfig.model || "lookbase",
-                  view: calcConfig.explore || "long_metrics",
+                  model: activeModel,
+                  view: activeExplore,
                   fields: [
                     pcConfig.memberIdField,
                     pcConfig.parentIdField,
@@ -1425,18 +2040,33 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                     pcConfig.pathField,
                     pcConfig.levelField,
                     pcConfig.isLeafField,
+                    ...(isMultiTf ? ["long_metrics.timeframe"] : []),
                     "long_metrics.current_period",
-                    ...(calcConfig.initial_state?.grid_measures || [
-                      "long_metrics.total_sale_price",
-                      "long_metrics.total_gross_margin",
-                      "long_metrics.gross_margin_percentage",
-                    ]),
+                    ...(selectedGridMeasureIdsRef.current.length > 0
+                      ? selectedGridMeasureIdsRef.current
+                      : activeCfg.initial_state?.grid_measures ||
+                        (activeCfg.measures?.length
+                          ? activeCfg.measures.slice(0, 4).map((m) => m.fieldName || m.id)
+                          : [
+                              "long_metrics.total_sale_price",
+                              "long_metrics.total_gross_margin",
+                              "long_metrics.gross_margin_percentage",
+                            ])),
                   ],
-                  pivots: ["long_metrics.current_period"],
+                  pivots: isMultiTf
+                    ? ["long_metrics.timeframe", "long_metrics.current_period"]
+                    : ["long_metrics.current_period"],
                   filters: {
                     "long_metrics.timeframe": povTimeframe,
                     "long_metrics.source_parameter": povSource,
-                    ...(povYear !== "ALL" ? { "long_metrics.year": povYear } : {}),
+                    ...(activeHierarchyId
+                      ? { "dim_product_hierarchy.hierarchy_id": activeHierarchyId }
+                      : {}),
+                    ...(povYear !== "ALL"
+                      ? povYear.includes("-")
+                        ? { "long_metrics.month": povYear }
+                        : { "long_metrics.year": povYear }
+                      : {}),
                   },
                 },
                 parentIdsToFetch,
@@ -1461,18 +2091,24 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               setIsBusy(false);
             }
           }
-        } else if (!isParentChildMode && calcConfig.hierarchy?.length) {
+        } else if (!isParentChildMode && calcConfigRef.current.hierarchy?.length) {
+          const activeCfg = calcConfigRef.current;
+          const activeModel = resolveEffectiveModel(activeCfg);
+          const activeExplore = activeCfg.explore || "long_metrics";
           for (const pathStr of nextExpanded) {
             if (!fetchedMemberIdsRef.current.has(pathStr)) {
               fetchedMemberIdsRef.current.add(pathStr);
               await fetchChildHierarchySlice(
                 core40SDK,
                 {
-                  model: calcConfig.model || "lookbase",
-                  view: calcConfig.explore || "long_metrics",
-                  fields: ["long_metrics.total_sale_price", "long_metrics.total_gross_margin"],
+                  model: activeModel,
+                  view: activeExplore,
+                  fields: activeCfg.initial_state?.grid_measures?.slice(0, 2) || [
+                    "long_metrics.total_sale_price",
+                    "long_metrics.total_gross_margin",
+                  ],
                 },
-                calcConfig.hierarchy,
+                activeCfg.hierarchy || [],
                 pathStr,
               );
             }
@@ -1483,13 +2119,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [
       handleUpdateConfig,
       core40SDK,
+      resolveEffectiveModel,
       isParentChildMode,
       projectedOutline,
-      calcConfig,
       pcConfig,
       povTimeframe,
       povSource,
       povYear,
+      activeHierarchyId,
       persistSavedExpansion,
       pushToast,
       updateToast,
@@ -1514,7 +2151,10 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       const colLetter = String.fromCharCode(65 + Math.min(25, colIdx));
       setActiveCellCoord(`${colLetter}${rowIdx}`);
 
-      const rowPath = tr.getAttribute("data-subtotal-path") || "All Products";
+      const rowPath =
+        tr.getAttribute("data-subtotal-path") ||
+        activeHierarchyDef?.rootLabel ||
+        "All Products";
       const node = projectedOutline?.pathToNode?.[rowPath];
       const memberId = node?.memberId || "ALL";
       setSelectedOutlineMemberId(memberId);
@@ -1522,23 +2162,30 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       const rawText = (td.textContent || "").replace(/[^\d.-]/g, "");
       const numericVal = parseFloat(rawText);
 
+      const primaryMeasureField =
+        calcConfig.measures?.[0]?.fieldName ||
+        calcConfig.measures?.[0]?.id ||
+        "long_metrics.total_sale_price";
+      const primaryMeasureLabel =
+        calcConfig.measures?.[0]?.label || "Total Sale Price";
+
       if (td.classList.contains("dimension")) {
         const parentNode = node?.parentId ? projectedOutline?.memberIdToNode?.[node.parentId] : undefined;
         const pctOfParent =
           node && parentNode
             ? evaluateLookBaseFormula(
-                "MEMBER('Total Sale Price') / NULLIF(PARENTVAL('Total Sale Price'), 0)",
+                `MEMBER('${primaryMeasureLabel}') / NULLIF(PARENTVAL('${primaryMeasureLabel}'), 0)`,
                 {
                   memberValues: {
-                    "Total Sale Price":
-                      node.rawRow?.["long_metrics.total_sale_price"]?.Current?.value ??
-                      node.rawRow?.["long_metrics.total_sale_price"]?.value ??
+                    [primaryMeasureLabel]:
+                      node.rawRow?.[primaryMeasureField]?.Current?.value ??
+                      node.rawRow?.[primaryMeasureField]?.value ??
                       0,
                   },
                   parentValues: {
-                    "Total Sale Price":
-                      parentNode.rawRow?.["long_metrics.total_sale_price"]?.Current?.value ??
-                      parentNode.rawRow?.["long_metrics.total_sale_price"]?.value ??
+                    [primaryMeasureLabel]:
+                      parentNode.rawRow?.[primaryMeasureField]?.Current?.value ??
+                      parentNode.rawRow?.[primaryMeasureField]?.value ??
                       0,
                   },
                 },
@@ -1552,13 +2199,13 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         setSelectedCellMeta(null);
       } else {
         setFormulaText(
-          `=GETVALUE("Total Sale Price", "Current", "${povTimeframe}", "${pcConfig.memberIdField}=${memberId}")`,
+          `=GETVALUE("${primaryMeasureLabel}", "Current", "${povTimeframe}", "${pcConfig.memberIdField}=${memberId}")`,
         );
         if (Number.isFinite(numericVal)) {
           setSelectedCellMeta({
             memberId,
             path: rowPath,
-            metric: "Total Sale Price",
+            metric: primaryMeasureLabel,
             period: "Current",
             currentValue: numericVal,
           });
@@ -1566,7 +2213,13 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         }
       }
     },
-    [projectedOutline, povTimeframe, pcConfig.memberIdField],
+    [
+      projectedOutline,
+      povTimeframe,
+      pcConfig.memberIdField,
+      activeHierarchyDef?.rootLabel,
+      calcConfig.measures,
+    ],
   );
 
   // Double-clicking a subtotal row toggles Zoom In / Zoom Out
@@ -1588,7 +2241,30 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       nextYear: string,
       changedField?: "source" | "timeframe",
     ) => {
-      const aligned = normalizeSourceAndTimeframe(nextSource, nextTimeframe, changedField);
+      const tfParts = String(nextTimeframe || "ytd")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const isMultiTf = tfParts.length > 1;
+      let aligned: { source: string; timeframe: string };
+      if (isMultiTf) {
+        const grainSpecificTf =
+          [...tfParts]
+            .reverse()
+            .find((tf) => tf !== "ytd" && tf !== "current_view") || tfParts[0];
+        const firstAligned = normalizeSourceAndTimeframe(
+          nextSource,
+          grainSpecificTf,
+          "timeframe",
+        );
+        aligned = {
+          timeframe: tfParts.join(","),
+          source: changedField === "source" ? nextSource : firstAligned.source,
+        };
+      } else {
+        aligned = normalizeSourceAndTimeframe(nextSource, nextTimeframe, changedField);
+      }
+
       setPovVersion(nextVersion);
       setPovTimeframe(aligned.timeframe);
       setPovSource(aligned.source);
@@ -1605,23 +2281,36 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         },
         artifactNamespace,
       );
-      if (tileSDK?.updateFilters) {
+      if (tileHostData?.isDashboardTile && tileSDK?.updateFilters) {
         applyFiltersToHost(tileSDK, {
           "long_metrics.timeframe": aligned.timeframe,
           "long_metrics.source_parameter": aligned.source,
-          "long_metrics.year": nextYear,
+          ...(nextYear.includes("-")
+            ? { "long_metrics.month": nextYear }
+            : { "long_metrics.year": nextYear }),
         });
-      } else {
+      }
+      if (!hostQueryResponse) {
         loadStandaloneOutline(
           nextVersion,
           aligned.timeframe,
           aligned.source,
           nextYear,
           savedExpandedMemberIds,
+          activeHierarchyId,
         );
       }
     },
-    [tileSDK, loadStandaloneOutline, savedExpandedMemberIds, core40SDK, artifactNamespace],
+    [
+      tileHostData?.isDashboardTile,
+      tileSDK,
+      hostQueryResponse,
+      loadStandaloneOutline,
+      savedExpandedMemberIds,
+      activeHierarchyId,
+      core40SDK,
+      artifactNamespace,
+    ],
   );
 
   const refreshBiEngineTables = useCallback(async () => {
@@ -1629,14 +2318,15 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     try {
       const discovered = await discoverBIEngineCandidateTables(
         core40SDK,
-        calcConfig.model || "lookbase",
+        effectiveModelRef.current,
+        calcConfigRef.current,
       );
       setBiEngineProjectId(discovered.projectId);
       setBiEngineTables(discovered.tables);
     } finally {
       setIsDiscoveringBiTables(false);
     }
-  }, [core40SDK, calcConfig.model]);
+  }, [core40SDK]);
 
   // On-demand Cube Rebuild (Calc All / Calc Measure PDT) + BI Engine Pinning
   const handleRebuildCube = useCallback(
@@ -1650,7 +2340,18 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         });
         return;
       }
-      const targetView = viewToRebuild || calcConfig.base_pdt_view || "long_metrics_base";
+      const activeCfg = calcConfigRef.current;
+      const isCustom = isCustomCalculationsConfig(activeCfg);
+      const targetView = isCustom
+        ? activeCfg.explore || "long_metrics"
+        : viewToRebuild || activeCfg.base_pdt_view || "long_metrics_base";
+      const rebuildFields = isCustom
+        ? [
+            activeCfg.measures?.[0]?.fieldName ||
+              activeCfg.measures?.[0]?.id ||
+              `${targetView}.count`,
+          ]
+        : undefined;
       setIsBusy(true);
       const toastId = pushToast({
         message: `Rebuilding PDT '${targetView}' (rebuild_pdts=true) & pinning to BI Engine...`,
@@ -1659,8 +2360,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       });
       try {
         await rebuildCubePdt(core40SDK, {
-          model: calcConfig.model || "lookbase",
+          model: resolveEffectiveModel(activeCfg),
           view: targetView,
+          fields: rebuildFields,
         });
         await refreshBiEngineTables();
         updateToast(toastId, {
@@ -1682,7 +2384,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [
       core40SDK,
       canRebuildCube,
-      calcConfig,
+      resolveEffectiveModel,
       loadStandaloneOutline,
       refreshBiEngineTables,
       pushToast,
@@ -1787,9 +2489,11 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     : undefined;
 
   const configuredQuickStarts =
-    calcConfig.quick_start_actions?.length
-      ? calcConfig.quick_start_actions
-      : DEFAULT_QUICK_START_ACTIONS;
+    !host && !configLoadedRef.current && hostProjectId !== "lookbase"
+      ? []
+      : calcConfig.quick_start_actions?.length
+        ? calcConfig.quick_start_actions
+        : DEFAULT_QUICK_START_ACTIONS;
 
   const visibleQuickStartActions = useMemo(
     () =>
@@ -1904,14 +2608,196 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           >
             Metrics on Left (Autocomplete)
           </button>
-          <button
-            id="lookbase-tour-hierarchy-btn"
-            className="lookbase-btn"
-            onClick={() => setIsHierarchyModalOpen(true)}
-            title="Open Jagged Hierarchy Subtree Filter (BigQuery WITH RECURSIVE CTE)"
-          >
-            Jagged Hierarchy Filter ({savedExpandedMemberIds.length} Saved)
-          </button>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <button
+              id="lookbase-tour-hierarchy-btn"
+              className="lookbase-btn"
+              onClick={() => setIsHierarchyModalOpen(true)}
+              title="Open Hierarchy Selector & Multi-Level Subtree Filter"
+            >
+              Hierarchy Selector: {activeHierarchyDef.shortLabel} ({savedExpandedMemberIds.length} Saved)
+            </button>
+            <select
+              aria-label="Quick Switch Active Hierarchy"
+              style={{
+                height: 22,
+                fontSize: 11,
+                border: "1px solid #93c5fd",
+                borderRadius: 3,
+                background: "#eff6ff",
+                color: "#1e3a8a",
+                fontWeight: 600,
+                padding: "0 4px",
+                cursor: "pointer",
+              }}
+              value={effectiveActiveHierarchyId}
+              onChange={(e) => handleSwitchHierarchy(e.target.value)}
+              title="Quick-swap active dimensional hierarchy"
+            >
+              {effectiveAvailableHierarchies
+                .filter((h) => effectiveEnabledHierarchyIds.includes(h.id))
+                .map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.shortLabel}
+                  </option>
+                ))}
+            </select>
+          </span>
+          <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+            <button
+              type="button"
+              data-testid="grid-measures-multiselect-btn"
+              className={`lookbase-btn ${isMeasuresDropdownOpen ? "active-toggle" : ""}`}
+              onClick={() => setIsMeasuresDropdownOpen((v) => !v)}
+              title="Select / Deselect LookML Measures shown as columns in the main outline grid"
+            >
+              Measures ({effectiveSelectedGridMeasureIds.length} Selected) ▾
+            </button>
+            {isMeasuresDropdownOpen && (
+              <div
+                data-testid="grid-measures-dropdown"
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  left: 0,
+                  width: 340,
+                  background: "#ffffff",
+                  border: "1px solid #94a3b8",
+                  borderRadius: 4,
+                  boxShadow: "0 8px 20px rgba(15, 23, 42, 0.18)",
+                  zIndex: 360,
+                  padding: 8,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    borderBottom: "1px solid #e2e8f0",
+                    paddingBottom: 6,
+                    marginBottom: 6,
+                  }}
+                >
+                  <strong style={{ fontSize: 11, color: "#0f172a" }}>
+                    Grid Columns ({effectiveSelectedGridMeasureIds.length} of{" "}
+                    {availableGridMeasures.length})
+                  </strong>
+                  <div style={{ display: "inline-flex", gap: 4 }}>
+                    <button
+                      type="button"
+                      className="lookbase-btn"
+                      style={{ height: 18, fontSize: 10, padding: "0 5px" }}
+                      onClick={() => {
+                        const defaultList = calcConfig.initial_state?.grid_measures?.length
+                          ? calcConfig.initial_state.grid_measures
+                          : availableGridMeasures
+                              .slice(0, 4)
+                              .map((m) => m.fieldName || m.id);
+                        if (defaultList.length === 0) return;
+                        selectedGridMeasureIdsRef.current = defaultList;
+                        setSelectedGridMeasureIds(defaultList);
+                        saveUserPrefsArtifact(
+                          core40SDK,
+                          { gridMeasureIds: defaultList },
+                          artifactNamespace,
+                        );
+                        loadStandaloneOutline(
+                          povVersion,
+                          povTimeframe,
+                          povSource,
+                          povYear,
+                          savedExpandedMemberIds,
+                          effectiveActiveHierarchyId,
+                          calcConfig,
+                          defaultList,
+                        );
+                      }}
+                    >
+                      Reset Default
+                    </button>
+                    <button
+                      type="button"
+                      className="lookbase-btn primary"
+                      style={{ height: 18, fontSize: 10, padding: "0 6px" }}
+                      onClick={() => setIsMeasuresDropdownOpen(false)}
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    maxHeight: 280,
+                    overflowY: "auto",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 3,
+                  }}
+                >
+                  {availableGridMeasures.map((m) => {
+                    const mKey = m.fieldName || m.id;
+                    const isChecked = effectiveSelectedGridMeasureIds.includes(mKey);
+                    return (
+                      <label
+                        key={mKey}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "4px 6px",
+                          borderRadius: 3,
+                          background: isChecked ? "#eff6ff" : "transparent",
+                          cursor: "pointer",
+                          fontSize: 11,
+                        }}
+                      >
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <input
+                            type="checkbox"
+                            data-testid={`grid-measure-opt-${mKey}`}
+                            checked={isChecked}
+                            onChange={() => {
+                              let nextList: string[];
+                              if (isChecked) {
+                                if (effectiveSelectedGridMeasureIds.length <= 1) return; // keep at least 1 measure
+                                nextList = effectiveSelectedGridMeasureIds.filter(
+                                  (id) => id !== mKey,
+                                );
+                              } else {
+                                nextList = [...effectiveSelectedGridMeasureIds, mKey];
+                              }
+                              selectedGridMeasureIdsRef.current = nextList;
+                              setSelectedGridMeasureIds(nextList);
+                              saveUserPrefsArtifact(
+                                core40SDK,
+                                { gridMeasureIds: nextList },
+                                artifactNamespace,
+                              );
+                              loadStandaloneOutline(
+                                povVersion,
+                                povTimeframe,
+                                povSource,
+                                povYear,
+                                savedExpandedMemberIds,
+                                effectiveActiveHierarchyId,
+                                calcConfig,
+                                nextList,
+                              );
+                            }}
+                          />
+                          <span style={{ fontWeight: isChecked ? 700 : 500, color: "#0f172a" }}>
+                            {m.label || m.label_short || mKey}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </span>
           <span id="lookbase-tour-actions" style={{ display: "inline-flex", gap: 6 }}>
             {canRebuildCube && (
               <>
@@ -1923,14 +2809,16 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                 >
                   Calc All (Rebuild Cube)
                 </button>
-                <button
-                  className="lookbase-btn"
-                  disabled={isBusy}
-                  onClick={() => handleRebuildCube("stacked_total_sale_price")}
-                  title="Rebuild only the modular stacked_total_sale_price PDT"
-                >
-                  Calc Sales PDT
-                </button>
+                {!isCustomCalculationsConfig(calcConfig) && (
+                  <button
+                    className="lookbase-btn"
+                    disabled={isBusy}
+                    onClick={() => handleRebuildCube("stacked_total_sale_price")}
+                    title="Rebuild only the modular stacked_total_sale_price PDT"
+                  >
+                    Calc Sales PDT
+                  </button>
+                )}
               </>
             )}
             {canUpdateSettings && (
@@ -1949,22 +2837,137 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         {/* Inline Top-Right POV Bar (Row 1 Slice Cells) */}
         <div id="lookbase-tour-pov" className="lookbase-ribbon-right">
           <span className="lookbase-pov-label">POV:</span>
-          <div className="lookbase-pov-cell" title="Stacked Timeframe Slice">
+          <div
+            className="lookbase-pov-cell"
+            style={{ position: "relative" }}
+            title="Multi-Select Stacked Timeframe Slice (Select 1 or more timeframes, e.g., R3M + R12M)"
+          >
             <span>Timeframe:</span>
-            <select
-              value={povTimeframe}
-              onChange={(e) =>
-                handlePovChange(povVersion, e.target.value, povSource, povYear, "timeframe")
-              }
+            <button
+              type="button"
+              data-testid="pov-timeframe-multiselect-btn"
+              onClick={() => setIsTimeframeDropdownOpen((v) => !v)}
+              style={{
+                border: "none",
+                background: "transparent",
+                fontWeight: 600,
+                color: "#0f172a",
+                fontSize: 11,
+                cursor: "pointer",
+                padding: "0 2px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
             >
-              <option value="ytd">YTD</option>
-              <option value="current_view">Current View</option>
-              <option value="r7d">Rolling 7D</option>
-              <option value="r28d">Rolling 28D</option>
-              <option value="r90d">Rolling 90D</option>
-              <option value="r3m">Rolling 3M</option>
-              <option value="r12m">Rolling 12M</option>
-            </select>
+              <span>
+                {selectedTimeframes.length === 1
+                  ? formatTimeframeLabel(selectedTimeframes[0])
+                  : selectedTimeframes.map((tf) => formatTimeframeShortLabel(tf)).join(" + ")}
+              </span>
+              <span style={{ fontSize: 9, color: "#475569" }}>▾</span>
+            </button>
+            {isTimeframeDropdownOpen && (
+              <div
+                data-testid="pov-timeframe-dropdown"
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  right: 0,
+                  width: 250,
+                  background: "#ffffff",
+                  border: "1px solid #94a3b8",
+                  borderRadius: 4,
+                  boxShadow: "0 8px 20px rgba(15, 23, 42, 0.18)",
+                  zIndex: 350,
+                  padding: 8,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    borderBottom: "1px solid #e2e8f0",
+                    paddingBottom: 6,
+                    marginBottom: 6,
+                  }}
+                >
+                  <strong style={{ fontSize: 11, color: "#0f172a" }}>
+                    Select Timeframes ({selectedTimeframes.length})
+                  </strong>
+                  <div style={{ display: "inline-flex", gap: 4 }}>
+                    <button
+                      type="button"
+                      className="lookbase-btn"
+                      style={{ height: 18, fontSize: 10, padding: "0 5px" }}
+                      onClick={() => setIsTimeframeDropdownOpen(false)}
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    maxHeight: 240,
+                    overflowY: "auto",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 3,
+                  }}
+                >
+                  {LOOKBASE_TIMEFRAME_OPTIONS.map((opt) => {
+                    const isChecked = selectedTimeframes.includes(opt.value);
+                    return (
+                      <label
+                        key={opt.value}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "3px 6px",
+                          borderRadius: 3,
+                          background: isChecked ? "#eff6ff" : "transparent",
+                          cursor: "pointer",
+                          fontSize: 11,
+                        }}
+                      >
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <input
+                            type="checkbox"
+                            data-testid={`timeframe-opt-${opt.value}`}
+                            checked={isChecked}
+                            onChange={() => {
+                              let nextList: string[];
+                              if (isChecked) {
+                                if (selectedTimeframes.length <= 1) return; // keep at least 1 timeframe
+                                nextList = selectedTimeframes.filter((t) => t !== opt.value);
+                              } else {
+                                nextList = [...selectedTimeframes, opt.value];
+                              }
+                              handlePovChange(
+                                povVersion,
+                                nextList.join(","),
+                                povSource,
+                                povYear,
+                                "timeframe",
+                              );
+                            }}
+                          />
+                          <span style={{ fontWeight: isChecked ? 700 : 500, color: "#0f172a" }}>
+                            {opt.label}
+                          </span>
+                        </span>
+                        <span style={{ fontSize: 9, color: "#64748b" }}>
+                          {opt.grain.replace(" Actual", "")}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
           <div className="lookbase-pov-cell" title="Aggregation Grain">
             <span>Grain:</span>
@@ -1979,20 +2982,40 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               <option value="Quarterly Actual">Quarterly Actual</option>
             </select>
           </div>
-          <div className="lookbase-pov-cell" title="Year Slice">
-            <span>Year:</span>
+          <div className="lookbase-pov-cell" title="Month + Year Slice">
+            <span>Month:</span>
             <select
+              aria-label="Month"
               value={povYear}
               onChange={(e) => handlePovChange(povVersion, povTimeframe, povSource, e.target.value)}
             >
-              <option value="ALL">All Years</option>
-              {availableYears.map((yr) => (
-                <option key={yr} value={yr}>
-                  {yr}
+              {availableYears.map((ym) => (
+                <option key={ym} value={ym}>
+                  {formatMonthYearLabel(ym)}
                 </option>
               ))}
+              <option value="ALL">All Months</option>
             </select>
           </div>
+          <button
+            id="lookbase-pov-run-btn"
+            className="lookbase-btn primary"
+            disabled={isBusy}
+            onClick={() => {
+              setIsTimeframeDropdownOpen(false);
+              loadStandaloneOutline(
+                povVersion,
+                povTimeframe,
+                povSource,
+                povYear,
+                savedExpandedMemberIds,
+                activeHierarchyId,
+              );
+            }}
+            title="Run / Refresh live BigQuery cube query for the selected POV slice"
+          >
+            {isBusy ? "Running..." : "↻ Run"}
+          </button>
         </div>
       </div>
 
@@ -2118,7 +3141,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           <div className="lookbase-left-metrics-pane">
             <div className="lookbase-left-pane-header">
               <span>
-                Metrics & Calculations ({activeOutlineNode?.label || "All Products"})
+                Metrics & Calculations ({activeOutlineNode?.label || activeHierarchyDef.rootLabel || "All Products"})
               </span>
               <span style={{ fontSize: 10, color: "#1e3a8a" }}>
                 L{activeOutlineNode?.level ?? 0} · {selectedOutlineMemberId}
@@ -2257,6 +3280,45 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
             </div>
 
             {/* Left-Hand Side Metrics Down Rows Table */}
+            {selectedTimeframes.length > 1 && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "4px 8px",
+                  background: "#f8fafc",
+                  borderBottom: "1px solid #cbd5e1",
+                  fontSize: 10,
+                }}
+              >
+                <span style={{ fontWeight: 600, color: "#334155" }}>Timeframe Slice:</span>
+                <div style={{ display: "inline-flex", gap: 4, flexWrap: "wrap" }}>
+                  {selectedTimeframes.map((tf) => {
+                    const isActiveTf = activeLeftTimeframe === tf;
+                    return (
+                      <button
+                        key={`left-tf-${tf}`}
+                        type="button"
+                        onClick={() => setLeftPaneTimeframe(tf)}
+                        style={{
+                          padding: "1px 6px",
+                          fontSize: 10,
+                          fontWeight: isActiveTf ? 700 : 500,
+                          borderRadius: 10,
+                          border: isActiveTf ? "1px solid #1d4ed8" : "1px solid #cbd5e1",
+                          background: isActiveTf ? "#dbeafe" : "#ffffff",
+                          color: isActiveTf ? "#1e3a8a" : "#334155",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {formatTimeframeShortLabel(tf)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div
               id="lookbase-tour-left-table"
               className="lookbase-left-metrics-table-wrap"
@@ -2265,7 +3327,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               <table className="lookbase-left-metrics-table">
                 <thead>
                   <tr>
-                    <th>Metric / Account (Col A)</th>
+                    <th>
+                      Metric / Account ({formatTimeframeShortLabel(activeLeftTimeframe)})
+                    </th>
                     <th>Current</th>
                     <th>Last Year</th>
                     <th>YoY Var %</th>
@@ -2279,6 +3343,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                       parentOutlineNode,
                       "Current",
                       calcConfig,
+                      selectedTimeframes.length > 1 ? activeLeftTimeframe : undefined,
                     );
                     const lyEval = evaluateLeftHandMetricRow(
                       mRow,
@@ -2286,6 +3351,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                       parentOutlineNode,
                       "Last Year",
                       calcConfig,
+                      selectedTimeframes.length > 1 ? activeLeftTimeframe : undefined,
                     );
                     const yoyPct =
                       curEval.value !== null && lyEval.value !== null && lyEval.value !== 0
@@ -2404,25 +3470,26 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         </div>
       </div>
 
-      {/* Jagged Hierarchy Subtree Filter Modal (BigQuery WITH RECURSIVE CTE + Saved Batch Expansion) */}
+      {/* Dynamic Hierarchy Selector & Multi-Level Subtree Filter Modal */}
       {isHierarchyModalOpen && (
         <div
           className="lookbase-modal-backdrop"
           onClick={() => setIsHierarchyModalOpen(false)}
         >
-          <div className="lookbase-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="lookbase-modal"
+            style={{ maxWidth: 680 }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="lookbase-modal-header">
               <div>
                 <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a" }}>
-                  Jagged Product / Organization Hierarchy (WITH RECURSIVE CTE)
+                  Hierarchy Selector — {activeHierarchyDef.label}
                 </div>
                 <div style={{ fontSize: 11, color: "#475569" }}>
-                  Full catalog loaded:{" "}
-                  <strong>
-                    {allHierarchyNodes.filter((n) => n.level === 2).length} Categories ·{" "}
-                    {allHierarchyNodes.filter((n) => n.isLeaf).length} Brands
-                  </strong>{" "}
-                  ({allHierarchyNodes.length} total nodes)
+                  Active Hierarchy: <strong>{activeHierarchyDef.shortLabel}</strong> · Levels:{" "}
+                  <code>{activeHierarchyDef.levelLabels.join(" → ")}</code> (
+                  {allHierarchyNodes.length} total nodes)
                 </div>
               </div>
               <button
@@ -2433,12 +3500,229 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               </button>
             </div>
             <div className="lookbase-modal-body">
+              {/* Section A: Active Hierarchy Tabs + Add/Remove Explore Hierarchies */}
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  padding: "6px 8px",
+                  marginBottom: 8,
+                  background: "#f8fafc",
+                  border: "1px solid #cbd5e1",
+                  borderRadius: 4,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#1e3a8a" }}>
+                    Hierarchies:
+                  </span>
+                  {effectiveAvailableHierarchies
+                    .filter((h) => effectiveEnabledHierarchyIds.includes(h.id))
+                    .map((h) => {
+                      const isActive = h.id === effectiveActiveHierarchyId;
+                      return (
+                        <span
+                          key={`tab-${h.id}`}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            borderRadius: 4,
+                            border: isActive ? "1px solid #1d4ed8" : "1px solid #cbd5e1",
+                            background: isActive ? "#1d4ed8" : "#ffffff",
+                            color: isActive ? "#ffffff" : "#1e293b",
+                            overflow: "hidden",
+                          }}
+                        >
+                          <button
+                            type="button"
+                            data-testid={`hierarchy-tab-${h.id}`}
+                            onClick={() => handleSwitchHierarchy(h.id)}
+                            style={{
+                              border: "none",
+                              background: "transparent",
+                              color: "inherit",
+                              fontSize: 11,
+                              fontWeight: isActive ? 700 : 600,
+                              padding: "3px 8px",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {h.shortLabel}
+                          </button>
+                          {effectiveEnabledHierarchyIds.length > 1 && (
+                            <button
+                              type="button"
+                              title={`Remove ${h.shortLabel} from active selector`}
+                              onClick={() => {
+                                const remaining = effectiveEnabledHierarchyIds.filter(
+                                  (id) => id !== h.id,
+                                );
+                                setEnabledHierarchyIds(remaining);
+                                if (effectiveActiveHierarchyId === h.id && remaining.length > 0) {
+                                  handleSwitchHierarchy(remaining[0]);
+                                }
+                              }}
+                              style={{
+                                border: "none",
+                                borderLeft: isActive
+                                  ? "1px solid rgba(255,255,255,0.3)"
+                                  : "1px solid #e2e8f0",
+                                background: "transparent",
+                                color: "inherit",
+                                fontSize: 10,
+                                padding: "3px 5px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              ×
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                </div>
+
+                {/* Add Hierarchy from Looker Explore */}
+                {effectiveAvailableHierarchies.some(
+                  (h) => !effectiveEnabledHierarchyIds.includes(h.id),
+                ) && (
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <select
+                      aria-label="Add Hierarchy from Looker Explore"
+                      style={{
+                        height: 22,
+                        fontSize: 11,
+                        border: "1px solid #cbd5e1",
+                        borderRadius: 3,
+                        padding: "0 4px",
+                      }}
+                      value={
+                        effectiveAvailableHierarchies.find(
+                          (h) =>
+                            h.id === exploreHierarchyToAdd &&
+                            !effectiveEnabledHierarchyIds.includes(h.id),
+                        )?.id ||
+                        effectiveAvailableHierarchies.find(
+                          (h) => !effectiveEnabledHierarchyIds.includes(h.id),
+                        )?.id ||
+                        ""
+                      }
+                      onChange={(e) => setExploreHierarchyToAdd(e.target.value)}
+                    >
+                      {effectiveAvailableHierarchies
+                        .filter((h) => !effectiveEnabledHierarchyIds.includes(h.id))
+                        .map((h) => (
+                          <option key={`add-opt-${h.id}`} value={h.id}>
+                            + {h.label}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="lookbase-btn primary"
+                      onClick={() => {
+                        const targetToAdd =
+                          effectiveAvailableHierarchies.find(
+                            (h) =>
+                              h.id === exploreHierarchyToAdd &&
+                              !effectiveEnabledHierarchyIds.includes(h.id),
+                          )?.id ||
+                          effectiveAvailableHierarchies.find(
+                            (h) => !effectiveEnabledHierarchyIds.includes(h.id),
+                          )?.id;
+                        if (targetToAdd) {
+                          handleSwitchHierarchy(targetToAdd);
+                        }
+                      }}
+                    >
+                      + Add &amp; Switch
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Section B: Level Filter Quick-Pills (Expand / Filter by Hierarchy Level) */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 6,
+                  marginBottom: 8,
+                  fontSize: 11,
+                }}
+              >
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 600, color: "#334155" }}>Filter / Expand Level:</span>
+                  {activeHierarchyDef.levelLabels.map((lvlLabel, lvlIdx) => (
+                    <button
+                      key={`lvl-pill-${lvlIdx}`}
+                      type="button"
+                      className="lookbase-btn"
+                      onClick={async () => {
+                        const parentIdsUpToLevel = allHierarchyNodes
+                          .filter((n) => !n.isLeaf && n.level < lvlIdx)
+                          .map((n) => n.memberId);
+                        const nextIds = Array.from(new Set(["ROOT", "ALL", ...parentIdsUpToLevel]));
+                        const nextPaths = deriveExpandedPathsFromMemberIds(
+                          nextIds,
+                          allHierarchyNodeMap,
+                        );
+                        persistSavedExpansion(nextIds, nextPaths);
+                        setExpandedPaths(nextPaths);
+                        setModalUnfoldedIds(nextIds);
+                        if (core40SDK && lvlIdx >= 5) {
+                          const l5Parents = allHierarchyNodes
+                            .filter((n) => !n.isLeaf && n.level === 5)
+                            .slice(0, 40)
+                            .map((n) => n.memberId);
+                          if (l5Parents.length > 0) {
+                            const children = await fetchHierarchyModalChildren(
+                              core40SDK,
+                              effectiveModelRef.current,
+                              l5Parents,
+                              pcConfig,
+                              5000,
+                              activeHierarchyId,
+                              calcConfigRef.current,
+                            );
+                            if (children.length > 0) {
+                              setHierarchyCatalogNodes((prev) => {
+                                const byId = new Map<string, OutlineNodeMeta>();
+                                for (const existing of prev) byId.set(existing.memberId, existing);
+                                for (const child of children) byId.set(child.memberId, child);
+                                return sortOutlineNodesTreeOrder(Array.from(byId.values()));
+                              });
+                            }
+                          }
+                        }
+                        loadStandaloneOutline(
+                          povVersion,
+                          povTimeframe,
+                          povSource,
+                          povYear,
+                          nextIds.slice(0, 60),
+                          activeHierarchyId,
+                        );
+                      }}
+                      title={`Expand hierarchy down to L${lvlIdx}: ${lvlLabel}`}
+                    >
+                      L{lvlIdx}: {lvlLabel}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Section C: Search & Bulk Branch Selection */}
               <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
                 <input
                   className="lookbase-autocomplete-input"
                   value={hierarchyFilterSearch}
                   onChange={(e) => setHierarchyFilterSearch(e.target.value)}
-                  placeholder="Filter all categories & brands (e.g. Men, Outerwear, Levi's, Nike)..."
+                  placeholder={`Search ${activeHierarchyDef.shortLabel} levels & members...`}
                 />
                 <button
                   className="lookbase-btn"
@@ -2462,23 +3746,17 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                   className="lookbase-btn"
                   title="Select default L0-L1 branches (Some)"
                   onClick={() => {
-                    const initIds =
-                      calcConfig.initial_state?.expanded_member_ids || [
-                        "ROOT",
-                        "ALL",
-                        "DEPT:Men",
-                        "DEPT:Women",
-                      ];
+                    const initIds = activeHierarchyDef.defaultExpandedIds || ["ROOT", "ALL"];
                     const initPaths = deriveExpandedPathsFromMemberIds(
                       initIds,
                       allHierarchyNodeMap,
-                      calcConfig.initial_state?.expanded_paths || ["All Products", "All Products|Men"],
+                      activeHierarchyDef.defaultExpandedPaths || [activeHierarchyDef.rootLabel],
                     );
                     persistSavedExpansion(initIds, initPaths);
                     setExpandedPaths(initPaths);
                   }}
                 >
-                  Select Some
+                  Select Default
                 </button>
                 <button
                   className="lookbase-btn"
@@ -2668,6 +3946,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                       povSource,
                       povYear,
                       savedExpandedMemberIds,
+                      activeHierarchyId,
                     );
                   }}
                 >

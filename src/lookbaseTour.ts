@@ -7,6 +7,7 @@ import {
   normalizeLookBaseSettings,
   QuickStartActionConfig,
   validateLookBaseSettings,
+  withSdkTimeout,
 } from "./essbaseEngine";
 
 export const TOUR_STORAGE_KEY = "lookbase_guided_tour_seen_v1";
@@ -31,6 +32,7 @@ export interface LookBaseUserPrefs {
   savedExpandedMemberIds?: string[];
   savedExpandedPaths?: string[];
   leftHandMetricIds?: string[];
+  gridMeasureIds?: string[];
   pov?: {
     version?: string;
     timeframe?: string;
@@ -87,8 +89,10 @@ export async function loadUserPrefsArtifact(
   }
 
   try {
-    const rawUser = await core40SDK.ok(
-      core40SDK.me("id,email,display_name,role_ids,group_ids"),
+    const rawUser: any = await withSdkTimeout(
+      core40SDK.ok(core40SDK.me("id,email,display_name,role_ids,group_ids")),
+      2500,
+      null,
     );
     const userId = rawUser?.id != null ? String(rawUser.id) : null;
     const user: LookBaseCurrentUser | null = rawUser
@@ -113,7 +117,11 @@ export async function loadUserPrefsArtifact(
     }
 
     const key = `user_${userId}_lookbase_prefs`;
-    const list = await core40SDK.ok(core40SDK.artifact({ namespace, key }));
+    const list: any = await withSdkTimeout(
+      core40SDK.ok(core40SDK.artifact({ namespace, key })),
+      2500,
+      [],
+    );
     const parsed = parseArtifactRecord(list?.[0]) as LookBaseUserPrefs;
     const mergedGuideIds = Array.from(
       new Set([...localGuideIds, ...(parsed.dismissedGuideIds || [])]),
@@ -160,10 +168,10 @@ export async function loadLookBaseSettings(
   if (activeHost) {
     try {
       if (typeof activeHost.refreshContextData === "function") {
-        await activeHost.refreshContextData();
+        await withSdkTimeout(activeHost.refreshContextData(), 1500, undefined);
       }
       if (typeof activeHost.getContextData === "function") {
-        const ctx = await activeHost.getContextData();
+        const ctx = await withSdkTimeout(activeHost.getContextData(), 1500, undefined);
         if (ctx && typeof ctx === "object") {
           contextSettings = ctx as Partial<LookBaseSettingsConfig>;
         }
@@ -175,8 +183,12 @@ export async function loadLookBaseSettings(
 
   if (core40SDK && typeof core40SDK.artifact === "function") {
     try {
-      const list = await core40SDK.ok(
-        core40SDK.artifact({ namespace, key: GLOBAL_SETTINGS_ARTIFACT_KEY }),
+      const list: any = await withSdkTimeout(
+        core40SDK.ok(
+          core40SDK.artifact({ namespace, key: GLOBAL_SETTINGS_ARTIFACT_KEY }),
+        ),
+        2500,
+        [],
       );
       if (list?.[0]) {
         artifactSettings = parseArtifactRecord(

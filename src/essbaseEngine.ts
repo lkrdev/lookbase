@@ -70,11 +70,206 @@ export const DEFAULT_LOOKBASE_SETTINGS: Required<LookBaseSettingsConfig> = {
   rebuild_cube_user_ids: [],
 };
 
+export interface LookBaseHierarchyDef {
+  id: string;
+  label: string;
+  shortLabel: string;
+  rootLabel: string;
+  description?: string;
+  levelLabels: string[];
+  defaultExpandedIds: string[];
+  defaultExpandedPaths: string[];
+  sourceType: "cube" | "explore";
+  exploreView?: string;
+  exploreDimensions?: string[];
+  preloadedByDefault?: boolean;
+}
+
+export interface LookBaseMeasureDef {
+  id: string;
+  label: string;
+  fieldName?: string;
+  format?: string;
+  description?: string;
+}
+
+export const BUILTIN_HIERARCHY_CATALOG: LookBaseHierarchyDef[] = [
+  {
+    id: "product",
+    label: "Product Hierarchy (Department → Category → Brand)",
+    shortLabel: "Product",
+    rootLabel: "All Products",
+    description: "Default LookBase Product Hierarchy (Department → Category → Brand)",
+    levelLabels: ["All Products", "Department", "Category", "Brand"],
+    defaultExpandedIds: ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"],
+    defaultExpandedPaths: ["All Products", "All Products|Men"],
+    sourceType: "cube",
+    exploreView: "dim_product_hierarchy",
+    exploreDimensions: [
+      "dim_products.department",
+      "dim_products.category",
+      "dim_products.brand",
+    ],
+    preloadedByDefault: true,
+  },
+];
+
+export const LOOKBASE_TIMEFRAME_OPTIONS: Array<{
+  value: string;
+  label: string;
+  shortLabel: string;
+  grain: string;
+}> = [
+  { value: "ytd", label: "YTD (Year-to-Date)", shortLabel: "YTD", grain: "All" },
+  { value: "current_view", label: "Current View", shortLabel: "Current View", grain: "All" },
+  { value: "r3m", label: "Rolling 3M (R3M)", shortLabel: "R3M", grain: "Monthly Actual" },
+  { value: "r6m", label: "Rolling 6M (R6M)", shortLabel: "R6M", grain: "Monthly Actual" },
+  { value: "r12m", label: "Rolling 12M (R12M)", shortLabel: "R12M", grain: "Monthly Actual" },
+  { value: "r7d", label: "Rolling 7D (R7D)", shortLabel: "R7D", grain: "Daily Actual" },
+  { value: "r28d", label: "Rolling 28D (R28D)", shortLabel: "R28D", grain: "Daily Actual" },
+  { value: "r90d", label: "Rolling 90D (R90D)", shortLabel: "R90D", grain: "Daily Actual" },
+  { value: "r3q", label: "Rolling 3Q (R3Q)", shortLabel: "R3Q", grain: "Quarterly Actual" },
+  { value: "r6q", label: "Rolling 6Q (R6Q)", shortLabel: "R6Q", grain: "Quarterly Actual" },
+  { value: "r12q", label: "Rolling 12Q (R12Q)", shortLabel: "R12Q", grain: "Quarterly Actual" },
+];
+
+export function formatTimeframeLabel(tf: string): string {
+  const found = LOOKBASE_TIMEFRAME_OPTIONS.find(
+    (o) => o.value.toLowerCase() === String(tf || "").toLowerCase(),
+  );
+  return found ? found.label : String(tf || "").toUpperCase();
+}
+
+export function formatTimeframeShortLabel(tf: string): string {
+  const found = LOOKBASE_TIMEFRAME_OPTIONS.find(
+    (o) => o.value.toLowerCase() === String(tf || "").toLowerCase(),
+  );
+  return found ? found.shortLabel : String(tf || "").toUpperCase();
+}
+
+const MONTH_ABBR_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+/**
+ * Formats a `YYYY-MM` reporting month string (e.g. `"2025-03"`) into a human-friendly
+ * Month + Year label (`"Mar 2025"`).
+ */
+export function formatMonthYearLabel(ym: string): string {
+  const raw = String(ym || "").trim();
+  if (!raw || raw.toUpperCase() === "ALL") return "All Months";
+  const match = raw.match(/^(\d{4})-(\d{1,2})$/);
+  if (match) {
+    const yr = match[1];
+    const mIdx = parseInt(match[2], 10) - 1;
+    if (mIdx >= 0 && mIdx < 12) {
+      return `${MONTH_ABBR_NAMES[mIdx]} ${yr}`;
+    }
+  }
+  return raw;
+}
+
+/**
+ * Returns `true` when `calcConfig` represents a customer-specific `calculations.strings.json`
+ * (or custom Looker Extension Context Data), indicating that none of the default e-commerce
+ * demo fallbacks (`All Products`, `DEPT:Men`, `DEPT:Women`, `Total Sale Price`, `Total Gross Margin`,
+ * `calc:implied_cogs`) should be displayed or injected.
+ */
+export function isCustomCalculationsConfig(calcConfig?: CalculationsConfig | null): boolean {
+  if (!calcConfig) return false;
+  if (calcConfig._isCustomProjectConfig) return true;
+  if (calcConfig.model && calcConfig.model !== "lookbase") return true;
+  if (Array.isArray(calcConfig.hierarchies) && calcConfig.hierarchies.length > 0) return true;
+  if (Array.isArray(calcConfig.measures) && calcConfig.measures.length > 0) return true;
+  const gridMeasures = calcConfig.initial_state?.grid_measures || [];
+  if (
+    gridMeasures.length > 0 &&
+    !gridMeasures.includes("long_metrics.total_sale_price")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Discovers all available dimensional hierarchies from LookML Explore metadata.
+ * When a customer-specific `calculations.strings.json` is present (`isCustomCalculationsConfig(calcConfig)`
+ * or `calcConfig?.hierarchies?.length`), completely replaces `BUILTIN_HIERARCHY_CATALOG` so default
+ * e-commerce hierarchies never appear in the UI.
+ */
+export function discoverHierarchiesFromExplore(
+  exploreMeta: any,
+  calcConfig?: CalculationsConfig | null,
+): LookBaseHierarchyDef[] {
+  const isCustom = isCustomCalculationsConfig(calcConfig);
+  const catalog: LookBaseHierarchyDef[] =
+    Array.isArray(calcConfig?.hierarchies) && calcConfig!.hierarchies!.length > 0
+      ? [...calcConfig!.hierarchies!]
+      : isCustom
+        ? []
+        : [...BUILTIN_HIERARCHY_CATALOG];
+  const seenIds = new Set(catalog.map((h) => h.id));
+  const rawDims: any[] = Array.isArray(exploreMeta?.fields?.dimensions)
+    ? exploreMeta.fields.dimensions
+    : [];
+  const byGroup = new Map<string, any[]>();
+  for (const d of rawDims) {
+    if (!d || d.hidden) continue;
+    const grp = String(d.field_group_label || d.group_label || "");
+    if (!grp) continue;
+    if (!byGroup.has(grp)) byGroup.set(grp, []);
+    byGroup.get(grp)!.push(d);
+  }
+  for (const [grpLabel, dims] of byGroup.entries()) {
+    if (dims.length < 2) continue;
+    const viewPrefix = String(dims[0]?.name || "").split(".")[0] || "";
+    const alreadyCovered = catalog.some(
+      (h) => h.exploreView === viewPrefix || h.label.toLowerCase().includes(grpLabel.toLowerCase()),
+    );
+    if (alreadyCovered) continue;
+    const id =
+      viewPrefix.replace(/^dim_/, "").replace(/_hierarchy$/, "") ||
+      grpLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    const sortedDims = [...dims].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    catalog.push({
+      id,
+      label: `${grpLabel} (${sortedDims.length} Levels)`,
+      shortLabel: grpLabel.replace(/\s*\(.*\)$/, ""),
+      rootLabel: grpLabel.replace(/\s*\(.*\)$/, ""),
+      description: `Discovered from LookML Explore (${viewPrefix})`,
+      levelLabels: sortedDims.map(
+        (d, idx) => d?.label_short || d?.label || (idx === 0 ? "Root" : `Level ${idx}`),
+      ),
+      defaultExpandedIds: ["ROOT", "ALL"],
+      defaultExpandedPaths: [grpLabel.replace(/\s*\(.*\)$/, "")],
+      sourceType: "explore",
+      exploreView: viewPrefix,
+      exploreDimensions: sortedDims.map((d) => String(d.name)),
+      preloadedByDefault: false,
+    });
+  }
+  return catalog;
+}
+
 export interface LookBaseUrlState {
   version?: string;
   timeframe?: string;
   source?: string;
   year?: string;
+  hierarchy?: string;
   member?: string;
   expanded?: string[];
   metrics?: string[];
@@ -97,6 +292,9 @@ export interface InitialUserStateConfig {
   timeframe?: string;
   source?: string;
   year?: string;
+  default_hierarchy?: string;
+  enabled_hierarchies?: string[];
+  available_years?: string[];
   selected_outline_member_id?: string;
   expanded_member_ids?: string[];
   expanded_paths?: string[];
@@ -114,6 +312,10 @@ export interface CalculationsConfig {
   field_discovery?: FieldDiscoveryConfig;
   measure_pdt_views?: Record<string, string>;
   settings?: LookBaseSettingsConfig;
+  hierarchies?: LookBaseHierarchyDef[];
+  measures?: LookBaseMeasureDef[];
+  starter_outline?: any;
+  _isCustomProjectConfig?: boolean;
   initial_state?: InitialUserStateConfig;
   quick_start_actions?: QuickStartActionConfig[];
   parent_child_hierarchy?: ParentChildHierarchyConfig;
@@ -176,7 +378,9 @@ export const DEFAULT_CALCULATIONS_CONFIG: CalculationsConfig = {
     version: "base",
     timeframe: "ytd",
     source: "Daily Actual",
-    year: "ALL",
+    year: "2025-03",
+    default_hierarchy: "product",
+    enabled_hierarchies: ["product"],
     selected_outline_member_id: "ALL",
     expanded_member_ids: ["ROOT", "ALL", "DEPT:Men", "DEPT:Women"],
     expanded_paths: ["All Products", "All Products|Men"],
@@ -292,24 +496,38 @@ export function discoverFieldsFromExplore(
   const discoveredMeasures = rawMeasures.filter(shouldIncludeField);
   const discoveredMeasureNames = discoveredMeasures.map((m) => String(m.name));
 
-  // Auto-build accounts map from discovered measures (reading value_format and optional lookbase:sign:-1 tag)
+  // Auto-build accounts map and LookBaseMeasureDef list from discovered measures
   const discoveredAccounts: Record<string, { sign: number; format?: string }> = {
     ...(baseConfig.accounts || {}),
   };
+  const existingMeasureMap = new Map<string, LookBaseMeasureDef>();
+  for (const existingM of baseConfig.measures || []) {
+    existingMeasureMap.set(existingM.id, existingM);
+  }
   for (const m of discoveredMeasures) {
-    const label = String(m.label_short || m.label || m.name);
+    const mName = String(m.name);
+    const label = String(m.label_short || m.label || mName);
     const tags: string[] = Array.isArray(m.tags)
       ? m.tags.map((t: any) => String(t).toLowerCase())
       : [];
     const isNegative = tags.includes("lookbase:sign:-1") || tags.includes("sign:-1");
     const fmt =
       m.value_format ||
-      (String(m.name).includes("percentage") || label.includes("%") ? "0.0%" : "$#,##0");
+      (mName.includes("percentage") || label.includes("%") ? "0.0%" : "$#,##0");
     if (!discoveredAccounts[label]) {
       discoveredAccounts[label] = {
         sign: isNegative ? -1 : 1,
         format: fmt,
       };
+    }
+    if (!existingMeasureMap.has(mName)) {
+      existingMeasureMap.set(mName, {
+        id: mName,
+        label,
+        fieldName: mName,
+        format: fmt,
+        description: m.description ? String(m.description) : `LookML Measure · ${mName}`,
+      });
     }
   }
 
@@ -356,16 +574,23 @@ export function discoverFieldsFromExplore(
     )
     .map((d) => String(d.name));
 
+  const isCustom =
+    isCustomCalculationsConfig(baseConfig) ||
+    (discoveredMeasureNames.length > 0 &&
+      !discoveredMeasureNames.includes("long_metrics.total_sale_price"));
+
   const gridMeasures =
     baseConfig.initial_state?.grid_measures?.length
       ? baseConfig.initial_state.grid_measures
       : discoveredMeasureNames.length > 0
         ? discoveredMeasureNames
-        : DEFAULT_CALCULATIONS_CONFIG.initial_state?.grid_measures || [];
+        : isCustom
+          ? []
+          : DEFAULT_CALCULATIONS_CONFIG.initial_state?.grid_measures || [];
 
   const defaultCalcIds = [
     ...(baseConfig.two_pass_metrics || []).map((tp) => `calc:${tp.id}`),
-    "calc:implied_cogs",
+    ...(isCustom ? [] : ["calc:implied_cogs"]),
   ];
   const leftHandMetrics =
     baseConfig.initial_state?.left_hand_metrics?.length
@@ -379,16 +604,20 @@ export function discoverFieldsFromExplore(
 
   return {
     ...baseConfig,
+    _isCustomProjectConfig: isCustom,
+    measures: Array.from(existingMeasureMap.values()),
     parent_child_hierarchy: pc,
     hierarchy:
       baseConfig.hierarchy?.length
         ? baseConfig.hierarchy
         : discoveredHierarchyDims.length > 0
           ? discoveredHierarchyDims
-          : DEFAULT_CALCULATIONS_CONFIG.hierarchy,
+          : isCustom
+            ? []
+            : DEFAULT_CALCULATIONS_CONFIG.hierarchy,
     accounts: discoveredAccounts,
     initial_state: {
-      ...DEFAULT_CALCULATIONS_CONFIG.initial_state,
+      ...(isCustom ? {} : DEFAULT_CALCULATIONS_CONFIG.initial_state),
       ...(baseConfig.initial_state || {}),
       grid_measures: gridMeasures,
       left_hand_metrics: leftHandMetrics,
@@ -425,6 +654,9 @@ export function parseLookBaseUrlState(searchOrRoute: string | undefined | null):
 
   const year = params.get("year");
   if (year) state.year = year;
+
+  const hierarchy = params.get("hierarchy");
+  if (hierarchy) state.hierarchy = hierarchy;
 
   const member = params.get("member");
   if (member) state.member = member;
@@ -479,6 +711,7 @@ export function serializeLookBaseUrlState(state: LookBaseUrlState): string {
   if (state.timeframe) params.set("timeframe", state.timeframe);
   if (state.source) params.set("source", state.source);
   if (state.year) params.set("year", state.year);
+  if (state.hierarchy) params.set("hierarchy", state.hierarchy);
   if (state.member) params.set("member", state.member);
   if (state.expanded && state.expanded.length > 0) {
     params.set("expanded", state.expanded.join(","));
@@ -757,18 +990,27 @@ export function buildAlterBiCapacitySql(
 export async function discoverBIEngineCandidateTables(
   core40SDK: any,
   model = "lookbase",
+  calcConfig?: CalculationsConfig | null,
 ): Promise<{
   projectId: string;
   tables: BIEngineCandidateTable[];
   alterSql: string;
 }> {
-  const probes: Array<{ view: string; field: string }> = [
-    { view: "long_metrics", field: "long_metrics.total_sale_price" },
-    { view: "stacked_total_sale_price", field: "stacked_total_sale_price.sum_value" },
-    { view: "stacked_total_gross_margin", field: "stacked_total_gross_margin.sum_value" },
-    { view: "metric_total_sale_price", field: "metric_total_sale_price.sum_value" },
-    { view: "metric_total_gross_margin", field: "metric_total_gross_margin.sum_value" },
-  ];
+  const isCustom = isCustomCalculationsConfig(calcConfig);
+  const customExplore = calcConfig?.explore || "long_metrics";
+  const customMeasure =
+    calcConfig?.measures?.[0]?.fieldName ||
+    calcConfig?.measures?.[0]?.id ||
+    `${customExplore}.count`;
+  const probes: Array<{ view: string; field: string }> = isCustom
+    ? [{ view: customExplore, field: customMeasure }]
+    : [
+        { view: "long_metrics", field: "long_metrics.total_sale_price" },
+        { view: "stacked_total_sale_price", field: "stacked_total_sale_price.sum_value" },
+        { view: "stacked_total_gross_margin", field: "stacked_total_gross_margin.sum_value" },
+        { view: "metric_total_sale_price", field: "metric_total_sale_price.sum_value" },
+        { view: "metric_total_gross_margin", field: "metric_total_gross_margin.sum_value" },
+      ];
 
   const sqlOutputs: string[] = [];
   if (core40SDK && typeof core40SDK.run_inline_query === "function") {
@@ -827,12 +1069,17 @@ export function deriveExpandedPathsFromMemberIds(
   expandedMemberIds: string[],
   memberIdToNode: Record<string, OutlineNodeMeta>,
   fallbackPaths: string[] = [],
+  defaultRootLabel = "All Products",
 ): string[] {
   const paths = new Set<string>();
   const hasExplicitRootOnly =
     Array.isArray(expandedMemberIds) &&
     expandedMemberIds.length > 0 &&
     expandedMemberIds.every((id) => id === "ROOT");
+  const inferredRoot =
+    memberIdToNode["ALL"]?.label ||
+    (fallbackPaths[0] ? String(fallbackPaths[0]).split("|")[0] : "") ||
+    defaultRootLabel;
   for (const id of expandedMemberIds || []) {
     if (id === "ROOT") continue;
     const node = memberIdToNode[id];
@@ -842,24 +1089,32 @@ export function deriveExpandedPathsFromMemberIds(
         paths.add(parts.slice(0, i).join("|"));
       }
     } else if (id === "ALL") {
-      paths.add("All Products");
+      paths.add(inferredRoot);
     } else if (id.startsWith("DEPT:")) {
       const dept = id.slice("DEPT:".length);
-      paths.add("All Products");
-      paths.add(`All Products|${dept}`);
-    } else if (id.startsWith("CAT:")) {
-      const rest = id.slice("CAT:".length);
-      const parts = ["All Products", ...rest.split("|")];
+      paths.add(inferredRoot);
+      paths.add(`${inferredRoot}|${dept}`);
+    } else if (
+      id.startsWith("CAT:") ||
+      id.startsWith("L3:") ||
+      id.startsWith("L4:") ||
+      id.startsWith("L5:")
+    ) {
+      const colonIdx = id.indexOf(":");
+      const rest = id.slice(colonIdx + 1);
+      const parts = [inferredRoot, ...rest.split("|")];
       for (let i = 1; i <= parts.length; i++) {
         paths.add(parts.slice(0, i).join("|"));
       }
-    } else if (id.startsWith("BRAND:")) {
-      const rest = id.slice("BRAND:".length);
+    } else if (id.startsWith("BRAND:") || id.startsWith("HOTEL:")) {
+      const colonIdx = id.indexOf(":");
+      const rest = id.slice(colonIdx + 1);
       const brandParts = rest.split("|");
-      // Parent category path is All Products | <Dept> | <Category>
-      const catParts = ["All Products", ...brandParts.slice(0, -1)];
-      for (let i = 1; i <= catParts.length; i++) {
-        paths.add(catParts.slice(0, i).join("|"));
+      if (brandParts.length > 1) {
+        const catParts = [inferredRoot, ...brandParts.slice(0, -1)];
+        for (let i = 1; i <= catParts.length; i++) {
+          paths.add(catParts.slice(0, i).join("|"));
+        }
       }
     }
   }
@@ -1272,40 +1527,267 @@ export function toggleHierarchyNodeTriState(
   return Array.from(expandedSet);
 }
 
+export const PROJECT_CALCULATIONS_ARTIFACT_KEY = "lookbase_project_calculations";
+
 /**
- * Loads `calculations.strings.json` from the LookML project via Looker's internal core API
- * (`GET /projects/:project_id/file/content?file_path=calculations.strings.json`).
+ * Wraps any Promise/thenable with a bounded timeout so unanswered Chatty/Extension Host calls
+ * can never hang startup or UI operations indefinitely.
+ */
+export function withSdkTimeout<T>(
+  promiseOrVal: Promise<T> | T,
+  timeoutMs = 3000,
+  fallbackValue: T,
+): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallbackValue);
+      }
+    }, timeoutMs);
+
+    Promise.resolve(promiseOrVal)
+      .then((val) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(val);
+        }
+      })
+      .catch(() => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallbackValue);
+        }
+      });
+  });
+}
+
+function normalizeParsedProjectCalculations(
+  rawInput: any,
+  projectId: string,
+): CalculationsConfig | null {
+  let parsed: any = parseSdkJson(rawInput);
+  if (Array.isArray(parsed)) {
+    parsed = parsed[0];
+  }
+  if (parsed && typeof parsed === "object" && parsed.value !== undefined && !parsed.lookbase_config_json && !parsed.hierarchies && !parsed.measures) {
+    parsed = parseSdkJson(parsed.value);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+  let embedded: Record<string, any> = {};
+  if (typeof parsed.lookbase_config_json === "string") {
+    try {
+      embedded = JSON.parse(parsed.lookbase_config_json);
+    } catch {
+      embedded = {};
+    }
+  } else if (parsed.lookbase_config_json && typeof parsed.lookbase_config_json === "object") {
+    embedded = parsed.lookbase_config_json;
+  }
+  const combined: Partial<CalculationsConfig> = {
+    ...parsed,
+    ...embedded,
+  };
+  const hasValidConfigContent = Boolean(
+    (typeof parsed.lookbase_config_json === "string" && parsed.lookbase_config_json.length > 2) ||
+      (parsed.lookbase_config_json && typeof parsed.lookbase_config_json === "object") ||
+      (Array.isArray(combined.hierarchies) && combined.hierarchies.length > 0) ||
+      (Array.isArray(combined.hierarchy) && combined.hierarchy.length > 0) ||
+      (Array.isArray(combined.measures) && combined.measures.length > 0) ||
+      (Array.isArray(combined.two_pass_metrics) && combined.two_pass_metrics.length > 0) ||
+      (combined.accounts &&
+        typeof combined.accounts === "object" &&
+        Object.keys(combined.accounts).length > 0),
+  );
+  if (!hasValidConfigContent) return null;
+
+  const isCustom =
+    isCustomCalculationsConfig(combined as CalculationsConfig) ||
+    Boolean(projectId && projectId !== "lookbase");
+  if (isCustom) {
+    return {
+      model: combined.model || projectId,
+      explore: combined.explore || "long_metrics",
+      writeback_explore: combined.writeback_explore || "lookbase_writeback",
+      base_pdt_view: combined.base_pdt_view || "long_metrics",
+      field_discovery:
+        combined.field_discovery || DEFAULT_CALCULATIONS_CONFIG.field_discovery,
+      measure_pdt_views: combined.measure_pdt_views || {},
+      settings: combined.settings || DEFAULT_LOOKBASE_SETTINGS,
+      hierarchies: combined.hierarchies || [],
+      measures: combined.measures || [],
+      starter_outline: combined.starter_outline,
+      _isCustomProjectConfig: true,
+      initial_state: combined.initial_state || {},
+      quick_start_actions: combined.quick_start_actions || [],
+      parent_child_hierarchy:
+        combined.parent_child_hierarchy ||
+        DEFAULT_CALCULATIONS_CONFIG.parent_child_hierarchy,
+      hierarchy: combined.hierarchy || [],
+      accounts: combined.accounts || {},
+      two_pass_metrics: combined.two_pass_metrics || [],
+      column_calcs:
+        combined.column_calcs || DEFAULT_CALCULATIONS_CONFIG.column_calcs,
+      pinned_rows: combined.pinned_rows || [],
+    };
+  }
+  return {
+    ...DEFAULT_CALCULATIONS_CONFIG,
+    ...combined,
+  };
+}
+
+function extractCalculationConfigFromArtifactResponse(
+  rawResp: any,
+  projectId: string,
+): CalculationsConfig | null {
+  const unwrapped = parseSdkJson(rawResp);
+  const items = Array.isArray(unwrapped)
+    ? unwrapped
+    : Array.isArray(unwrapped?.value)
+      ? unwrapped.value
+      : unwrapped
+        ? [unwrapped]
+        : [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    if (item.key && item.key !== PROJECT_CALCULATIONS_ARTIFACT_KEY) continue;
+    const candidate = item.value !== undefined ? item.value : item;
+    const resolved = normalizeParsedProjectCalculations(candidate, projectId);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+/**
+ * Loads `calculations.strings.json` for the LookML project:
+ * 1. First checks Looker's Artifact API (`core40SDK.artifact` / `core40SDK.search_artifacts`)
+ *    and Extension Context Data (`extensionSDK.getContextData()`), which work in Production Mode across all users.
+ * 2. Falls back to `GET /projects/:project_id/file/content?file_path=calculations.strings.json` via `invokeCoreSdk`.
+ * 3. When a customer-specific `calculations.strings.json` is present (or `projectId !== "lookbase"`), returns the
+ *    customer configuration without merging default e-commerce measures, accounts, or hierarchies.
  */
 export async function loadProjectCalculations(
   extensionSDK: any,
   projectId = "lookbase",
   filePath = "calculations.strings.json",
+  core40SDK?: any,
+  artifactNamespace?: string,
 ): Promise<CalculationsConfig> {
-  if (!extensionSDK || typeof extensionSDK.invokeCoreSdk !== "function") {
-    return DEFAULT_CALCULATIONS_CONFIG;
-  }
-  try {
-    const raw = await extensionSDK.invokeCoreSdk(
-      "GET",
-      `/projects/${encodeURIComponent(projectId)}/file/content`,
-      { file_path: filePath },
+  // 1. Try Looker Artifact API (works in Production Mode in Looker Extension Host without calling /projects/:id/file/content)
+  if (core40SDK) {
+    const nsToTry = Array.from(
+      new Set(
+        [artifactNamespace, `${projectId}::lookbase`, projectId].filter(Boolean) as string[],
+      ),
     );
-    const body = raw?.ok !== undefined ? raw.value : raw;
-    const parsed = typeof body === "string" ? JSON.parse(body) : body;
-    if (parsed && typeof parsed === "object") {
-      const embedded =
-        typeof parsed.lookbase_config_json === "string"
-          ? JSON.parse(parsed.lookbase_config_json)
-          : {};
-      return {
-        ...DEFAULT_CALCULATIONS_CONFIG,
-        ...parsed,
-        ...embedded,
-      };
+    for (const ns of nsToTry) {
+      if (typeof core40SDK.artifact === "function") {
+        try {
+          const list = await withSdkTimeout(
+            core40SDK.ok(
+              core40SDK.artifact({ namespace: ns, key: PROJECT_CALCULATIONS_ARTIFACT_KEY }),
+            ),
+            8000,
+            null,
+          );
+          const resolved = extractCalculationConfigFromArtifactResponse(list, projectId);
+          if (resolved) return resolved;
+        } catch {
+          // continue to next source
+        }
+      }
+      if (typeof core40SDK.search_artifacts === "function") {
+        try {
+          const list = await withSdkTimeout(
+            core40SDK.ok(
+              core40SDK.search_artifacts({ namespace: ns, key: PROJECT_CALCULATIONS_ARTIFACT_KEY }),
+            ),
+            4000,
+            null,
+          );
+          const resolved = extractCalculationConfigFromArtifactResponse(list, projectId);
+          if (resolved) return resolved;
+        } catch {
+          // continue to next source
+        }
+      }
     }
-  } catch {
-    // ponytail: fallback to built-in default config when project file is absent or user lacks develop permission
   }
+
+  // 2. Try Extension Context Data
+  if (extensionSDK) {
+    try {
+      const rawCtx =
+        typeof extensionSDK.getContextData === "function"
+          ? await withSdkTimeout(extensionSDK.getContextData(), 1500, null)
+          : extensionSDK.lookerHostData?.contextData
+            ? parseSdkJson(extensionSDK.lookerHostData.contextData)
+            : null;
+      const resolved = normalizeParsedProjectCalculations(rawCtx, projectId);
+      if (resolved) return resolved;
+    } catch {
+      // continue to next source
+    }
+  }
+
+  // 3. Try /projects/:project_id/file/content
+  if (extensionSDK && typeof extensionSDK.invokeCoreSdk === "function") {
+    try {
+      const raw: any = await withSdkTimeout(
+        extensionSDK.invokeCoreSdk(
+          "GET",
+          `/projects/${encodeURIComponent(projectId)}/file/content`,
+          { file_path: filePath },
+        ),
+        3000,
+        null,
+      );
+      if (raw && raw.ok !== false) {
+        const body = raw?.ok !== undefined ? raw.value : raw;
+        const resolved = normalizeParsedProjectCalculations(body, projectId);
+        if (resolved) return resolved;
+      }
+    } catch {
+      // ponytail: fallback when project file endpoint is unavailable in production extension host
+    }
+  }
+
+  // 4. If running inside a non-`lookbase` project, never fall back to e-commerce model/measures
+  if (projectId && projectId !== "lookbase") {
+    return {
+      model: projectId,
+      explore: "long_metrics",
+      writeback_explore: "lookbase_writeback",
+      base_pdt_view: "long_metrics",
+      field_discovery: DEFAULT_CALCULATIONS_CONFIG.field_discovery,
+      measure_pdt_views: {},
+      settings: DEFAULT_LOOKBASE_SETTINGS,
+      hierarchies: [],
+      measures: [],
+      _isCustomProjectConfig: true,
+      initial_state: {
+        version: "base",
+        timeframe: "ytd",
+        source: "Daily Actual",
+        year: "2025-03",
+        grid_measures: [],
+        left_hand_metrics: [],
+      },
+      quick_start_actions: [],
+      parent_child_hierarchy: DEFAULT_CALCULATIONS_CONFIG.parent_child_hierarchy,
+      hierarchy: [],
+      accounts: {},
+      two_pass_metrics: [],
+      column_calcs: DEFAULT_CALCULATIONS_CONFIG.column_calcs,
+      pinned_rows: [],
+    };
+  }
+
   return DEFAULT_CALCULATIONS_CONFIG;
 }
 
@@ -1613,9 +2095,54 @@ function buildStarterHierarchyCatalogNodes(): OutlineNodeMeta[] {
 export const STARTER_HIERARCHY_CATALOG_NODES: OutlineNodeMeta[] = buildStarterHierarchyCatalogNodes();
 
 /**
+ * Returns starter hierarchy nodes for `hierarchyId`.
+ * - When `isCustomCalculationsConfig(calcConfig)` is `true`, synthesizes the root and initial L1
+ *   branch nodes strictly from `calcConfig.hierarchies` (so default e-commerce nodes never appear).
+ * - Only falls back to `STARTER_HIERARCHY_CATALOG_NODES` (`All Products`, `Men`, `Women`) when no
+ *   customer `calculations.strings.json` is present.
+ */
+export function getStarterHierarchyNodesForId(
+  hierarchyId = "product",
+  calcConfig?: CalculationsConfig | null,
+): OutlineNodeMeta[] {
+  if (isCustomCalculationsConfig(calcConfig)) {
+    const hDef =
+      calcConfig?.hierarchies?.find((h) => h.id === hierarchyId) ||
+      calcConfig?.hierarchies?.[0];
+    if (!hDef) return [];
+    const rootLabel = hDef.rootLabel || hDef.shortLabel || "Total";
+    const nodes: OutlineNodeMeta[] = [
+      {
+        memberId: "ALL",
+        parentId: "ROOT",
+        label: rootLabel,
+        path: rootLabel,
+        level: 0,
+        isLeaf: false,
+        rawRow: {},
+      },
+    ];
+    for (const id of hDef.defaultExpandedIds || []) {
+      if (id === "ROOT" || id === "ALL") continue;
+      const label = id.includes(":") ? id.slice(id.indexOf(":") + 1) : id;
+      nodes.push({
+        memberId: id,
+        parentId: "ALL",
+        label,
+        path: `${rootLabel}|${label}`,
+        level: 1,
+        isLeaf: false,
+        rawRow: {},
+      });
+    }
+    return sortOutlineNodesTreeOrder(nodes);
+  }
+  return STARTER_HIERARCHY_CATALOG_NODES;
+}
+
+/**
  * Asynchronously fetches immediate child nodes (`WHERE parent_id IN (...)`) for one or more
- * parent branches when unfolding `L1`, `L2`, etc. in the Jagged Hierarchy Modal, so even
- * hierarchies where `L1`/`L2`/`L3` exceed Looker's 5,000-row limit load cleanly on demand.
+ * parent branches when unfolding `L1`, `L2`, etc. in the Hierarchy Selector Modal.
  */
 export async function fetchHierarchyModalChildren(
   core40SDK: any,
@@ -1623,6 +2150,8 @@ export async function fetchHierarchyModalChildren(
   parentIds: string | string[],
   pcConfig: ParentChildHierarchyConfig = DEFAULT_CALCULATIONS_CONFIG.parent_child_hierarchy!,
   limit = 5000,
+  hierarchyId?: string,
+  calcConfig?: CalculationsConfig | null,
 ): Promise<OutlineNodeMeta[]> {
   const parentList = Array.isArray(parentIds) ? parentIds : [parentIds];
   const parentFilterExpr = buildLookerFilterExpression(parentList);
@@ -1630,7 +2159,9 @@ export async function fetchHierarchyModalChildren(
 
   if (!core40SDK || typeof core40SDK.run_inline_query !== "function") {
     const parentSet = new Set(parentList);
-    return STARTER_HIERARCHY_CATALOG_NODES.filter((n) => parentSet.has(n.parentId));
+    return getStarterHierarchyNodesForId(hierarchyId, calcConfig).filter((n) =>
+      parentSet.has(n.parentId),
+    );
   }
 
   const fields = [
@@ -1642,7 +2173,25 @@ export async function fetchHierarchyModalChildren(
     pcConfig.isLeafField,
   ];
 
+  const isCustom = isCustomCalculationsConfig(calcConfig);
+  const resolvedHierarchyId =
+    isCustom &&
+    calcConfig?.hierarchies?.length &&
+    (!hierarchyId || !calcConfig.hierarchies.some((h) => h.id === hierarchyId))
+      ? calcConfig.initial_state?.default_hierarchy || calcConfig.hierarchies[0].id
+      : hierarchyId;
+  const primaryExplore = calcConfig?.explore || "long_metrics";
   const runForView = async (viewName: string) => {
+    const filters: Record<string, string> = {
+      [pcConfig.parentIdField]: parentFilterExpr,
+    };
+    if (resolvedHierarchyId && resolvedHierarchyId !== "product") {
+      filters["dim_product_hierarchy.hierarchy_id"] =
+        escapeLookerFilterValue(resolvedHierarchyId);
+    } else if (resolvedHierarchyId && isCustom) {
+      filters["dim_product_hierarchy.hierarchy_id"] =
+        escapeLookerFilterValue(resolvedHierarchyId);
+    }
     const raw = await core40SDK.ok(
       core40SDK.run_inline_query({
         result_format: "json",
@@ -1650,9 +2199,7 @@ export async function fetchHierarchyModalChildren(
           model,
           view: viewName,
           fields,
-          filters: {
-            [pcConfig.parentIdField]: parentFilterExpr,
-          },
+          filters,
           sorts: [pcConfig.levelField, pcConfig.labelField],
           limit: String(limit),
         },
@@ -1667,9 +2214,9 @@ export async function fetchHierarchyModalChildren(
   };
 
   try {
-    let rows = await runForView("dim_product_hierarchy");
-    if (!rows.length) {
-      rows = await runForView("long_metrics");
+    let rows = await runForView(primaryExplore);
+    if (!rows.length && primaryExplore !== "dim_product_hierarchy") {
+      rows = await runForView("dim_product_hierarchy");
     }
     const extracted: OutlineNodeMeta[] = [];
     for (const r of rows) {
@@ -1681,7 +2228,9 @@ export async function fetchHierarchyModalChildren(
     }
   } catch {
     try {
-      const rows = await runForView("long_metrics");
+      const fallbackView =
+        primaryExplore === "dim_product_hierarchy" ? "long_metrics" : "dim_product_hierarchy";
+      const rows = await runForView(fallbackView);
       const extracted: OutlineNodeMeta[] = [];
       for (const r of rows) {
         const node = extractOutlineNode(r, pcConfig);
@@ -1696,21 +2245,25 @@ export async function fetchHierarchyModalChildren(
   }
 
   const parentSet = new Set(parentList);
-  return STARTER_HIERARCHY_CATALOG_NODES.filter((n) => parentSet.has(n.parentId));
+  return getStarterHierarchyNodesForId(hierarchyId, calcConfig).filter((n) =>
+    parentSet.has(n.parentId),
+  );
 }
 
 /**
  * Fetches the full `(member_id, parent_id, member_label, member_path, level_num, is_leaf)`
  * outline directory from Looker (`dim_product_hierarchy` explore, falling back to `long_metrics`)
- * so the Jagged Hierarchy Modal and Autocomplete display all 36 categories and 4,391 brands.
+ * for the specified `hierarchyId`.
  */
 export async function fetchFullHierarchyCatalog(
   core40SDK: any,
   model = "lookbase",
   pcConfig: ParentChildHierarchyConfig = DEFAULT_CALCULATIONS_CONFIG.parent_child_hierarchy!,
+  hierarchyId?: string,
+  calcConfig?: CalculationsConfig | null,
 ): Promise<OutlineNodeMeta[]> {
   if (!core40SDK || typeof core40SDK.run_inline_query !== "function") {
-    return STARTER_HIERARCHY_CATALOG_NODES;
+    return getStarterHierarchyNodesForId(hierarchyId, calcConfig);
   }
 
   const fields = [
@@ -1722,7 +2275,31 @@ export async function fetchFullHierarchyCatalog(
     pcConfig.isLeafField,
   ];
 
-  const runForView = async (viewName: string, filters?: Record<string, string>) => {
+  const isCustom = isCustomCalculationsConfig(calcConfig);
+  const resolvedHierarchyId =
+    isCustom &&
+    calcConfig?.hierarchies?.length &&
+    (!hierarchyId || !calcConfig.hierarchies.some((h) => h.id === hierarchyId))
+      ? calcConfig.initial_state?.default_hierarchy || calcConfig.hierarchies[0].id
+      : hierarchyId;
+  const activeHDef =
+    calcConfig?.hierarchies?.find((h) => h.id === resolvedHierarchyId) ||
+    calcConfig?.hierarchies?.[0];
+  const isDeepHierarchy = (activeHDef?.levelLabels?.length || 4) >= 6;
+  const primaryExplore = calcConfig?.explore || "long_metrics";
+
+  const runForView = async (viewName: string, extraFilters?: Record<string, string>) => {
+    const filters: Record<string, string> = {
+      ...(isDeepHierarchy ? { [pcConfig.levelField]: "<=5" } : {}),
+      ...(extraFilters || {}),
+    };
+    if (resolvedHierarchyId && resolvedHierarchyId !== "product") {
+      filters["dim_product_hierarchy.hierarchy_id"] =
+        escapeLookerFilterValue(resolvedHierarchyId);
+    } else if (resolvedHierarchyId && isCustom) {
+      filters["dim_product_hierarchy.hierarchy_id"] =
+        escapeLookerFilterValue(resolvedHierarchyId);
+    }
     const raw = await core40SDK.ok(
       core40SDK.run_inline_query({
         result_format: "json",
@@ -1745,11 +2322,11 @@ export async function fetchFullHierarchyCatalog(
   };
 
   try {
-    let rows = await runForView("dim_product_hierarchy");
-    if (!rows.length) {
-      rows = await runForView("long_metrics", {
-        [pcConfig.levelField]: ">=0",
-      });
+    let rows = await runForView(primaryExplore, {
+      [pcConfig.levelField]: ">=0",
+    });
+    if (!rows.length && primaryExplore !== "dim_product_hierarchy") {
+      rows = await runForView("dim_product_hierarchy");
     }
     const extracted: OutlineNodeMeta[] = [];
     for (const r of rows) {
@@ -1761,9 +2338,9 @@ export async function fetchFullHierarchyCatalog(
     }
   } catch {
     try {
-      const rows = await runForView("long_metrics", {
-        [pcConfig.levelField]: ">=0",
-      });
+      const fallbackView =
+        primaryExplore === "dim_product_hierarchy" ? "long_metrics" : "dim_product_hierarchy";
+      const rows = await runForView(fallbackView);
       const extracted: OutlineNodeMeta[] = [];
       for (const r of rows) {
         const node = extractOutlineNode(r, pcConfig);
@@ -1777,7 +2354,7 @@ export async function fetchFullHierarchyCatalog(
     }
   }
 
-  return STARTER_HIERARCHY_CATALOG_NODES;
+  return getStarterHierarchyNodesForId(hierarchyId, calcConfig);
 }
 
 /**
@@ -1944,10 +2521,9 @@ export function projectOutlineRowsToReportTable(
     }
   }
 
-  const measureFields: any[] =
-    normalizedBase?.fields?.measure_like?.length > 0
-      ? normalizedBase.fields.measure_like
-      : STARTER_OUTLINE_QUERY_RESPONSE.fields.measure_like;
+  const measureFields: any[] = Array.isArray(normalizedBase?.fields?.measure_like)
+    ? normalizedBase.fields.measure_like
+    : STARTER_OUTLINE_QUERY_RESPONSE.fields.measure_like;
 
   const pivotFields: Array<{ name: string }> = Array.isArray(normalizedBase?.fields?.pivots)
     ? normalizedBase.fields.pivots
@@ -1955,6 +2531,9 @@ export function projectOutlineRowsToReportTable(
   const rawPivots: any[] = Array.isArray(normalizedBase?.pivots)
     ? normalizedBase.pivots
     : [];
+  const timeframeOrderMap = new Map<string, number>(
+    LOOKBASE_TIMEFRAME_OPTIONS.map((opt, i) => [opt.value.toLowerCase(), i]),
+  );
   const normalizedPivots = rawPivots.map((p, idx) => {
     const sortValues: Record<string, any> = { ...(p?.sort_values || {}) };
     const metadata: Record<string, any> = { ...(p?.metadata || {}) };
@@ -1962,18 +2541,27 @@ export function projectOutlineRowsToReportTable(
     for (const pf of pivotFields) {
       const fName = pf.name;
       const fallbackVal = data[fName] ?? p?.key ?? String(idx);
+      const renderedVal =
+        fName === "long_metrics.timeframe"
+          ? formatTimeframeLabel(String(fallbackVal))
+          : String(fallbackVal);
       if (data[fName] === undefined) {
         data[fName] = fallbackVal;
       }
-      if (sortValues[fName] === undefined) {
+      if (fName === "long_metrics.timeframe") {
+        const tfIdx = timeframeOrderMap.get(String(fallbackVal).toLowerCase());
+        sortValues[fName] =
+          tfIdx !== undefined
+            ? `${String(tfIdx).padStart(2, "0")}_${String(fallbackVal)}`
+            : String(fallbackVal);
+      } else if (sortValues[fName] === undefined) {
         sortValues[fName] = fallbackVal;
       }
-      if (metadata[fName] === undefined) {
-        metadata[fName] = {
-          value: fallbackVal,
-          rendered: String(fallbackVal),
-        };
-      }
+      metadata[fName] = {
+        ...(metadata[fName] || {}),
+        value: fallbackVal,
+        rendered: renderedVal,
+      };
     }
     return {
       ...p,
@@ -2070,7 +2658,7 @@ export function projectOutlineRowsToReportTable(
     data: leafDataRows,
     subtotals_data: subtotalsData,
     pivots: normalizedPivots,
-    sorts: [],
+    sorts: pivotFields.map((pf) => ({ name: pf.name, desc: false })),
     fields: {
       ...(normalizedBase?.fields || {}),
       dimension_like: syntheticDims,
@@ -2334,64 +2922,102 @@ export function buildAutocompleteCatalog(
     items.push(item);
   };
 
-  // 1. Built-in / Explore LookML Measures
-  const defaultMeasures: Array<{ id: string; label: string; fieldName: string; format: string; desc: string }> = [
-    {
-      id: "long_metrics.total_sale_price",
-      label: "Total Sale Price",
-      fieldName: "long_metrics.total_sale_price",
-      format: "$#,##0",
-      desc: "LookML Measure · SUM(value) WHERE metric = 'Total Sale Price'",
-    },
-    {
-      id: "long_metrics.total_gross_margin",
-      label: "Total Gross Margin",
-      fieldName: "long_metrics.total_gross_margin",
-      format: "$#,##0",
-      desc: "LookML Measure · SUM(value) WHERE metric = 'Total Gross Margin'",
-    },
-    {
-      id: "long_metrics.gross_margin_percentage",
-      label: "Gross Margin % (LookML)",
-      fieldName: "long_metrics.gross_margin_percentage",
-      format: "0.0%",
-      desc: "LookML Measure · total_gross_margin / NULLIF(total_sale_price, 0)",
-    },
-    {
-      id: "long_metrics.count",
-      label: "Cube Row Count",
-      fieldName: "long_metrics.count",
-      format: "#,##0",
-      desc: "LookML Measure · COUNT(*)",
-    },
-  ];
+  const isCustomConfig = isCustomCalculationsConfig(calcConfig);
+  const configuredMeasures = Array.isArray(calcConfig?.measures)
+    ? calcConfig.measures
+    : [];
 
-  for (const m of defaultMeasures) {
+  // 1a. Customer-configured measures from calculations.strings.json (if present)
+  for (const m of configuredMeasures) {
+    const id = m.id || m.fieldName;
+    if (!id) continue;
+    const label = m.label || m.label_short || id;
+    const fieldName = m.fieldName || id;
     pushUnique({
-      id: m.id,
-      label: m.label,
+      id,
+      label,
       category: "measure",
-      fieldName: m.fieldName,
-      formula: `MEMBER('${m.label.replace(/\s*\(LookML\)$/, "")}')`,
-      format: m.format,
-      description: m.desc,
+      fieldName,
+      formula: m.formula || `MEMBER('${label.replace(/\s*\(LookML\)$/, "")}')`,
+      format: m.format || m.value_format || "$#,##0",
+      description: m.description || `Configured Measure · ${fieldName}`,
     });
   }
 
+  // 1b. Built-in eCommerce Demo Measures (ONLY when no customer calculations.strings.json is present)
+  if (!isCustomConfig) {
+    const defaultMeasures: Array<{
+      id: string;
+      label: string;
+      fieldName: string;
+      format: string;
+      desc: string;
+    }> = [
+      {
+        id: "long_metrics.total_sale_price",
+        label: "Total Sale Price",
+        fieldName: "long_metrics.total_sale_price",
+        format: "$#,##0",
+        desc: "LookML Measure · Total Gross Revenue across selected period",
+      },
+      {
+        id: "long_metrics.total_gross_margin",
+        label: "Total Gross Margin",
+        fieldName: "long_metrics.total_gross_margin",
+        format: "$#,##0",
+        desc: "LookML Measure · Total Gross Profit Margin",
+      },
+      {
+        id: "long_metrics.gross_margin_percentage",
+        label: "Gross Margin % (LookML)",
+        fieldName: "long_metrics.gross_margin_percentage",
+        format: "0.0%",
+        desc: "LookML Measure · Native SQL Margin Ratio",
+      },
+      {
+        id: "long_metrics.count",
+        label: "Cube Row Count",
+        fieldName: "long_metrics.count",
+        format: "#,##0",
+        desc: "LookML Measure · Number of underlying order records",
+      },
+    ];
+
+    for (const m of defaultMeasures) {
+      pushUnique({
+        id: m.id,
+        label: m.label,
+        category: "measure",
+        fieldName: m.fieldName,
+        formula: `MEMBER('${m.label.replace(/\s*\(LookML\)$/, "")}')`,
+        format: m.format,
+        description: m.desc,
+      });
+    }
+  }
+
+  // 1c. Live Explore Measure Fields discovered from LookML model
   for (const mf of availableMeasureFields) {
     const label = mf.label_short || mf.label || mf.name;
+    const isCountOrLocal =
+      mf.name.includes("local") ||
+      mf.name.includes("units") ||
+      mf.name.includes("count") ||
+      mf.name.includes("smart_reporting");
     pushUnique({
       id: mf.name,
       label,
       category: "measure",
       fieldName: mf.name,
       formula: `MEMBER('${label}')`,
-      format: label.includes("%") ? "0.0%" : "$#,##0",
-      description: `LookML Measure · ${mf.name}`,
+      format:
+        mf.value_format ||
+        (label.includes("%") ? "0.0%" : isCountOrLocal ? "#,##0" : "$#,##0"),
+      description: mf.description || `LookML Measure · ${mf.name}`,
     });
   }
 
-  // 2. Two-Pass Calculations from calculations.strings.json
+  // 2. Two-Pass Calculations from calculations.strings.json (or eCommerce defaults)
   for (const tp of calcConfig.two_pass_metrics || []) {
     pushUnique({
       id: `calc:${tp.id}`,
@@ -2403,28 +3029,40 @@ export function buildAutocompleteCatalog(
     });
   }
 
-  // Additional built-in two-pass calculation presets
-  const extraCalcs: AutocompleteItem[] = [
-    {
-      id: "calc:implied_cogs",
-      label: "Implied Cost of Goods Sold (COGS)",
-      category: "two_pass_calc",
-      formula: "MEMBER('Total Sale Price') - MEMBER('Total Gross Margin')",
-      format: "$#,##0",
-      description: "Two-Pass Calc · Sales minus Gross Margin",
-    },
-    {
-      id: "calc:margin_to_sales_ratio",
-      label: "Markup on Cost %",
-      category: "two_pass_calc",
-      formula:
-        "MEMBER('Total Gross Margin') / NULLIF(MEMBER('Total Sale Price') - MEMBER('Total Gross Margin'), 0)",
-      format: "0.0%",
-      description: "Two-Pass Calc · Gross Margin / Implied COGS",
-    },
-  ];
-  for (const ec of extraCalcs) {
-    pushUnique(ec);
+  // Extra eCommerce Demo Two-Pass Calcs (ONLY when no customer calculations.strings.json is present)
+  if (!isCustomConfig) {
+    const extraCalcs: Array<{
+      id: string;
+      label: string;
+      formula: string;
+      format: string;
+      desc: string;
+    }> = [
+      {
+        id: "calc:implied_cogs",
+        label: "Implied COGS ($)",
+        formula: "MEMBER('Total Sale Price') - MEMBER('Total Gross Margin')",
+        format: "$#,##0",
+        desc: "Derived Calculation · Revenue minus Gross Margin",
+      },
+      {
+        id: "calc:margin_to_sales_ratio",
+        label: "Contribution Margin Ratio (%)",
+        formula: "MEMBER('Total Gross Margin') / MEMBER('Total Sale Price')",
+        format: "0.0%",
+        desc: "Two-Pass Ratio · Gross Margin divided by Sale Price",
+      },
+    ];
+    for (const ec of extraCalcs) {
+      pushUnique({
+        id: ec.id,
+        label: ec.label,
+        category: "two_pass_calc",
+        formula: ec.formula,
+        format: ec.format,
+        description: ec.desc,
+      });
+    }
   }
 
   // 3. Column / Variance Calculations
@@ -2440,12 +3078,17 @@ export function buildAutocompleteCatalog(
   }
 
   // 4. Loaded Outline Hierarchy Members
+  const primaryMeasureLabel =
+    configuredMeasures[0]?.label ||
+    availableMeasureFields[0]?.label_short ||
+    availableMeasureFields[0]?.label ||
+    (isCustomConfig ? "Primary Measure" : "Total Sale Price");
   for (const node of loadedNodes) {
     pushUnique({
       id: `member:${node.memberId}`,
       label: node.label,
       category: "member",
-      formula: `GETVALUE('Total Sale Price', 'Current', 'ytd', '${node.memberId}')`,
+      formula: `GETVALUE('${primaryMeasureLabel}', 'Current', 'ytd', '${node.memberId}')`,
       format: "$#,##0",
       description: `Outline Member (L${node.level}) · ${node.path}`,
       level: node.level,
@@ -2583,21 +3226,28 @@ export function evaluateLeftHandMetricRow(
   parentNode: OutlineNodeMeta | undefined,
   periodKey: string,
   calcConfig: CalculationsConfig = DEFAULT_CALCULATIONS_CONFIG,
+  timeframeKey?: string,
 ): { value: number | null; formatted: string } {
   const row = node?.rawRow || {};
   const parentRow = parentNode?.rawRow || {};
 
+  const resolveCell = (r: Record<string, any>, fieldName: string, pKey: string): any => {
+    const fObj = r?.[fieldName];
+    if (!fObj || typeof fObj !== "object") return fObj;
+    if (timeframeKey && fObj[`${timeframeKey}|FIELD|${pKey}`] !== undefined) {
+      return fObj[`${timeframeKey}|FIELD|${pKey}`];
+    }
+    if (fObj[pKey] !== undefined) return fObj[pKey];
+    const matchKey = Object.keys(fObj).find((k) => k.endsWith(`|FIELD|${pKey}`));
+    if (matchKey) return fObj[matchKey];
+    return fObj;
+  };
+
   const getRawMetric = (r: Record<string, any>, fieldName: string): number => {
-    const cell = r?.[fieldName]?.[periodKey] ?? r?.[fieldName];
+    const cell = resolveCell(r, fieldName, periodKey);
     const v = cell?.value ?? cell;
     return typeof v === "number" && Number.isFinite(v) ? v : 0;
   };
-
-  const sales = getRawMetric(row, "long_metrics.total_sale_price");
-  const margin = getRawMetric(row, "long_metrics.total_gross_margin");
-  const gmPct = getRawMetric(row, "long_metrics.gross_margin_percentage");
-  const parentSales = getRawMetric(parentRow, "long_metrics.total_sale_price") || sales;
-  const parentMargin = getRawMetric(parentRow, "long_metrics.total_gross_margin") || margin;
 
   if (item.category === "measure" && item.fieldName) {
     const directVal = getRawMetric(row, item.fieldName);
@@ -2608,24 +3258,72 @@ export function evaluateLeftHandMetricRow(
     };
   }
 
-  const currentSales =
-    row?.["long_metrics.total_sale_price"]?.Current?.value ?? sales;
-  const lySales =
-    row?.["long_metrics.total_sale_price"]?.["Last Year"]?.value ?? 0;
+  const isCustomConfig = isCustomCalculationsConfig(calcConfig);
+  const configuredMeasures = Array.isArray(calcConfig?.measures)
+    ? calcConfig.measures
+    : [];
+
+  const memberValues: Record<string, number> = {};
+  const parentValues: Record<string, number> = {};
+
+  // Populate dynamic measure values from calcConfig.measures
+  for (const m of configuredMeasures) {
+    const fName = m.fieldName || m.id;
+    if (!fName) continue;
+    const valCur = getRawMetric(row, fName);
+    const valPar = getRawMetric(parentRow, fName) || valCur;
+    if (m.label) {
+      memberValues[m.label] = valCur;
+      parentValues[m.label] = valPar;
+    }
+    if (m.label_short) {
+      memberValues[m.label_short] = valCur;
+      parentValues[m.label_short] = valPar;
+    }
+    memberValues[fName] = valCur;
+    parentValues[fName] = valPar;
+  }
+
+  // Also index any raw measure keys on row/parentRow directly
+  for (const key of Object.keys(row)) {
+    if (key.includes(".") && memberValues[key] === undefined) {
+      const valCur = getRawMetric(row, key);
+      const valPar = getRawMetric(parentRow, key) || valCur;
+      memberValues[key] = valCur;
+      parentValues[key] = valPar;
+    }
+  }
+
+  const salePriceFallback = getRawMetric(row, "long_metrics.total_sale_price");
+  const grossMarginFallback = getRawMetric(row, "long_metrics.total_gross_margin");
+  const parentSalePriceFallback =
+    getRawMetric(parentRow, "long_metrics.total_sale_price") || salePriceFallback;
+  const parentGrossMarginFallback =
+    getRawMetric(parentRow, "long_metrics.total_gross_margin") || grossMarginFallback;
+
+  if (!isCustomConfig) {
+    memberValues["Total Sale Price"] = salePriceFallback;
+    memberValues["Total Gross Margin"] = grossMarginFallback;
+    parentValues["Total Sale Price"] = parentSalePriceFallback;
+    parentValues["Total Gross Margin"] = parentGrossMarginFallback;
+  }
+
+  const primaryFieldName =
+    configuredMeasures[0]?.fieldName ||
+    configuredMeasures[0]?.id ||
+    "long_metrics.total_sale_price";
+  const primaryVal = getRawMetric(row, primaryFieldName);
+  const currentPrimary =
+    resolveCell(row, primaryFieldName, "Current")?.value ?? primaryVal;
+  const lyPrimary =
+    resolveCell(row, primaryFieldName, "Last Year")?.value ?? 0;
 
   const val = evaluateEssbaseFormula(item.formula || "", {
-    memberValues: {
-      "Total Sale Price": sales,
-      "Total Gross Margin": margin,
-      "Gross Margin %": gmPct,
-    },
-    parentValues: {
-      "Total Sale Price": parentSales,
-      "Total Gross Margin": parentMargin,
-    },
+    memberValues,
+    parentValues,
     pivotValues: {
-      Current: currentSales,
-      "Last Year": lySales,
+      Current: currentPrimary,
+      "Last Year": lyPrimary,
     },
     accounts: calcConfig.accounts,
   });
@@ -2646,17 +3344,23 @@ export function resolveInitialLeftHandMetrics(
   catalog: AutocompleteItem[] = buildAutocompleteCatalog(calcConfig),
   userMetricIdsOverride?: string[],
 ): AutocompleteItem[] {
-  const targetIds =
+  const isCustomConfig = isCustomCalculationsConfig(calcConfig);
+  const configuredInitialMetrics = calcConfig.initial_state?.left_hand_metrics;
+  const rawTargetIds =
     userMetricIdsOverride && userMetricIdsOverride.length > 0
       ? userMetricIdsOverride
-      : calcConfig.initial_state?.left_hand_metrics ||
-        DEFAULT_CALCULATIONS_CONFIG.initial_state?.left_hand_metrics || [
-          "long_metrics.total_sale_price",
-          "long_metrics.total_gross_margin",
-          "calc:gm_pct",
-          "calc:pct_of_parent",
-          "calc:implied_cogs",
-        ];
+      : configuredInitialMetrics && configuredInitialMetrics.length > 0
+        ? configuredInitialMetrics
+        : isCustomConfig
+          ? (calcConfig.measures || []).slice(0, 4).map((m) => m.id || m.fieldName)
+          : DEFAULT_CALCULATIONS_CONFIG.initial_state?.left_hand_metrics || [
+              "long_metrics.total_sale_price",
+              "long_metrics.total_gross_margin",
+              "calc:gm_pct",
+              "calc:pct_of_parent",
+              "calc:implied_cogs",
+            ];
+  const targetIds = Array.from(new Set(rawTargetIds));
 
   const byId = new Map<string, AutocompleteItem>();
   for (const item of catalog) {
@@ -2679,12 +3383,16 @@ export function resolveInitialLeftHandMetrics(
       });
     }
   }
+  if (resolved.length === 0 && userMetricIdsOverride && userMetricIdsOverride.length > 0) {
+    return resolveInitialLeftHandMetrics(calcConfig, catalog, undefined);
+  }
   return resolved;
 }
 
 /**
- * Built-in starter outline snapshot across all 4 levels (L0 Root -> L1 Department -> L2 Category -> L3 Brand)
- * so LookBase renders a complete interactive parent-child grid immediately on initial open.
+ * Built-in eCommerce demo starter outline snapshot so LookBase renders a complete interactive
+ * parent-child grid immediately when running in standalone eCommerce fallback mode (without a
+ * customer-specific `calculations.strings.json`).
  */
 export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
   fields: {
@@ -2715,7 +3423,7 @@ export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
       },
       {
         name: "long_metrics.gross_margin_percentage",
-        label: "Gross Margin %",
+        label: "Gross Margin % (LookML)",
         label_short: "Gross Margin %",
         type: "number",
         is_numeric: true,
@@ -2756,36 +3464,16 @@ export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
       "dim_product_hierarchy.level_num": { value: 0 },
       "dim_product_hierarchy.is_leaf": { value: "No" },
       "long_metrics.total_sale_price": {
-        Current: { value: 1842500, rendered: "$1,842,500" },
-        "Last Year": { value: 1590200, rendered: "$1,590,200" },
+        Current: { value: 1842650, rendered: "$1,842,650" },
+        "Last Year": { value: 1614900, rendered: "$1,614,900" },
       },
       "long_metrics.total_gross_margin": {
-        Current: { value: 958100, rendered: "$958,100" },
-        "Last Year": { value: 811002, rendered: "$811,002" },
+        Current: { value: 958178, rendered: "$958,178" },
+        "Last Year": { value: 823599, rendered: "$823,599" },
       },
       "long_metrics.gross_margin_percentage": {
         Current: { value: 0.52, rendered: "52.0%" },
         "Last Year": { value: 0.51, rendered: "51.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "DEPT:Men" },
-      "dim_product_hierarchy.parent_id": { value: "ALL" },
-      "dim_product_hierarchy.member_label": { value: "Men" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men" },
-      "dim_product_hierarchy.level_num": { value: 1 },
-      "dim_product_hierarchy.is_leaf": { value: "No" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 942100, rendered: "$942,100" },
-        "Last Year": { value: 812400, rendered: "$812,400" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 499313, rendered: "$499,313" },
-        "Last Year": { value: 422448, rendered: "$422,448" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.53, rendered: "53.0%" },
-        "Last Year": { value: 0.52, rendered: "52.0%" },
       },
     },
     {
@@ -2796,92 +3484,12 @@ export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
       "dim_product_hierarchy.level_num": { value: 1 },
       "dim_product_hierarchy.is_leaf": { value: "No" },
       "long_metrics.total_sale_price": {
-        Current: { value: 900400, rendered: "$900,400" },
-        "Last Year": { value: 777800, rendered: "$777,800" },
+        Current: { value: 984200, rendered: "$984,200" },
+        "Last Year": { value: 861400, rendered: "$861,400" },
       },
       "long_metrics.total_gross_margin": {
-        Current: { value: 458787, rendered: "$458,787" },
-        "Last Year": { value: 388554, rendered: "$388,554" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.51, rendered: "51.0%" },
-        "Last Year": { value: 0.5, rendered: "50.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "CAT:Men|Jeans" },
-      "dim_product_hierarchy.parent_id": { value: "DEPT:Men" },
-      "dim_product_hierarchy.member_label": { value: "Jeans" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Jeans" },
-      "dim_product_hierarchy.level_num": { value: 2 },
-      "dim_product_hierarchy.is_leaf": { value: "No" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 412000, rendered: "$412,000" },
-        "Last Year": { value: 355000, rendered: "$355,000" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 222480, rendered: "$222,480" },
-        "Last Year": { value: 188150, rendered: "$188,150" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.54, rendered: "54.0%" },
-        "Last Year": { value: 0.53, rendered: "53.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Jeans|Levi's" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Jeans" },
-      "dim_product_hierarchy.member_label": { value: "Levi's" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Jeans|Levi's" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 168500, rendered: "$168,500" },
-        "Last Year": { value: 145200, rendered: "$145,200" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 92675, rendered: "$92,675" },
-        "Last Year": { value: 78408, rendered: "$78,408" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.55, rendered: "55.0%" },
-        "Last Year": { value: 0.54, rendered: "54.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Jeans|Calvin Klein" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Jeans" },
-      "dim_product_hierarchy.member_label": { value: "Calvin Klein" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Jeans|Calvin Klein" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 112400, rendered: "$112,400" },
-        "Last Year": { value: 96800, rendered: "$96,800" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 60696, rendered: "$60,696" },
-        "Last Year": { value: 51304, rendered: "$51,304" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.54, rendered: "54.0%" },
-        "Last Year": { value: 0.53, rendered: "53.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Jeans|7 For All Mankind" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Jeans" },
-      "dim_product_hierarchy.member_label": { value: "7 For All Mankind" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Jeans|7 For All Mankind" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 78100, rendered: "$78,100" },
-        "Last Year": { value: 67000, rendered: "$67,000" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 41393, rendered: "$41,393" },
-        "Last Year": { value: 34840, rendered: "$34,840" },
+        Current: { value: 521626, rendered: "$521,626" },
+        "Last Year": { value: 447928, rendered: "$447,928" },
       },
       "long_metrics.gross_margin_percentage": {
         Current: { value: 0.53, rendered: "53.0%" },
@@ -2889,103 +3497,43 @@ export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
       },
     },
     {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Jeans|Wrangler" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Jeans" },
-      "dim_product_hierarchy.member_label": { value: "Wrangler" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Jeans|Wrangler" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
+      "dim_product_hierarchy.member_id": { value: "DEPT:Men" },
+      "dim_product_hierarchy.parent_id": { value: "ALL" },
+      "dim_product_hierarchy.member_label": { value: "Men" },
+      "dim_product_hierarchy.member_path": { value: "All Products|Men" },
+      "dim_product_hierarchy.level_num": { value: 1 },
+      "dim_product_hierarchy.is_leaf": { value: "No" },
       "long_metrics.total_sale_price": {
-        Current: { value: 53000, rendered: "$53,000" },
-        "Last Year": { value: 46000, rendered: "$46,000" },
+        Current: { value: 858450, rendered: "$858,450" },
+        "Last Year": { value: 753500, rendered: "$753,500" },
       },
       "long_metrics.total_gross_margin": {
-        Current: { value: 27716, rendered: "$27,716" },
-        "Last Year": { value: 23598, rendered: "$23,598" },
+        Current: { value: 436552, rendered: "$436,552" },
+        "Last Year": { value: 375671, rendered: "$375,671" },
       },
       "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.523, rendered: "52.3%" },
-        "Last Year": { value: 0.513, rendered: "51.3%" },
+        Current: { value: 0.5085, rendered: "50.9%" },
+        "Last Year": { value: 0.4986, rendered: "49.9%" },
       },
     },
     {
-      "dim_product_hierarchy.member_id": { value: "CAT:Men|Outerwear & Coats" },
-      "dim_product_hierarchy.parent_id": { value: "DEPT:Men" },
+      "dim_product_hierarchy.member_id": { value: "CAT:Women|Outerwear & Coats" },
+      "dim_product_hierarchy.parent_id": { value: "DEPT:Women" },
       "dim_product_hierarchy.member_label": { value: "Outerwear & Coats" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Outerwear & Coats" },
+      "dim_product_hierarchy.member_path": { value: "All Products|Women|Outerwear & Coats" },
       "dim_product_hierarchy.level_num": { value: 2 },
       "dim_product_hierarchy.is_leaf": { value: "No" },
       "long_metrics.total_sale_price": {
-        Current: { value: 530100, rendered: "$530,100" },
-        "Last Year": { value: 457400, rendered: "$457,400" },
+        Current: { value: 342100, rendered: "$342,100" },
+        "Last Year": { value: 289500, rendered: "$289,500" },
       },
       "long_metrics.total_gross_margin": {
-        Current: { value: 276833, rendered: "$276,833" },
-        "Last Year": { value: 234298, rendered: "$234,298" },
+        Current: { value: 191576, rendered: "$191,576" },
+        "Last Year": { value: 156330, rendered: "$156,330" },
       },
       "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.522, rendered: "52.2%" },
-        "Last Year": { value: 0.512, rendered: "51.2%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Outerwear & Coats|The North Face" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Outerwear & Coats" },
-      "dim_product_hierarchy.member_label": { value: "The North Face" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Outerwear & Coats|The North Face" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 245000, rendered: "$245,000" },
-        "Last Year": { value: 211000, rendered: "$211,000" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 129850, rendered: "$129,850" },
-        "Last Year": { value: 109720, rendered: "$109,720" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.53, rendered: "53.0%" },
-        "Last Year": { value: 0.52, rendered: "52.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Outerwear & Coats|Patagonia" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Outerwear & Coats" },
-      "dim_product_hierarchy.member_label": { value: "Patagonia" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Outerwear & Coats|Patagonia" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 175100, rendered: "$175,100" },
-        "Last Year": { value: 151400, rendered: "$151,400" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 91052, rendered: "$91,052" },
-        "Last Year": { value: 77214, rendered: "$77,214" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.52, rendered: "52.0%" },
-        "Last Year": { value: 0.51, rendered: "51.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Men|Outerwear & Coats|Columbia" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Men|Outerwear & Coats" },
-      "dim_product_hierarchy.member_label": { value: "Columbia" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Men|Outerwear & Coats|Columbia" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 110000, rendered: "$110,000" },
-        "Last Year": { value: 95000, rendered: "$95,000" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 55931, rendered: "$55,931" },
-        "Last Year": { value: 47364, rendered: "$47,364" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.508, rendered: "50.8%" },
-        "Last Year": { value: 0.499, rendered: "49.9%" },
+        Current: { value: 0.56, rendered: "56.0%" },
+        "Last Year": { value: 0.54, rendered: "54.0%" },
       },
     },
     {
@@ -2996,12 +3544,52 @@ export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
       "dim_product_hierarchy.level_num": { value: 2 },
       "dim_product_hierarchy.is_leaf": { value: "No" },
       "long_metrics.total_sale_price": {
-        Current: { value: 485000, rendered: "$485,000" },
-        "Last Year": { value: 410000, rendered: "$410,000" },
+        Current: { value: 278900, rendered: "$278,900" },
+        "Last Year": { value: 251200, rendered: "$251,200" },
       },
       "long_metrics.total_gross_margin": {
-        Current: { value: 252200, rendered: "$252,200" },
-        "Last Year": { value: 209100, rendered: "$209,100" },
+        Current: { value: 150606, rendered: "$150,606" },
+        "Last Year": { value: 130624, rendered: "$130,624" },
+      },
+      "long_metrics.gross_margin_percentage": {
+        Current: { value: 0.54, rendered: "54.0%" },
+        "Last Year": { value: 0.52, rendered: "52.0%" },
+      },
+    },
+    {
+      "dim_product_hierarchy.member_id": { value: "CAT:Women|Sweaters" },
+      "dim_product_hierarchy.parent_id": { value: "DEPT:Women" },
+      "dim_product_hierarchy.member_label": { value: "Sweaters" },
+      "dim_product_hierarchy.member_path": { value: "All Products|Women|Sweaters" },
+      "dim_product_hierarchy.level_num": { value: 2 },
+      "dim_product_hierarchy.is_leaf": { value: "No" },
+      "long_metrics.total_sale_price": {
+        Current: { value: 198400, rendered: "$198,400" },
+        "Last Year": { value: 179300, rendered: "$179,300" },
+      },
+      "long_metrics.total_gross_margin": {
+        Current: { value: 99200, rendered: "$99,200" },
+        "Last Year": { value: 87857, rendered: "$87,857" },
+      },
+      "long_metrics.gross_margin_percentage": {
+        Current: { value: 0.5, rendered: "50.0%" },
+        "Last Year": { value: 0.49, rendered: "49.0%" },
+      },
+    },
+    {
+      "dim_product_hierarchy.member_id": { value: "CAT:Men|Jeans" },
+      "dim_product_hierarchy.parent_id": { value: "DEPT:Men" },
+      "dim_product_hierarchy.member_label": { value: "Jeans" },
+      "dim_product_hierarchy.member_path": { value: "All Products|Men|Jeans" },
+      "dim_product_hierarchy.level_num": { value: 2 },
+      "dim_product_hierarchy.is_leaf": { value: "No" },
+      "long_metrics.total_sale_price": {
+        Current: { value: 312450, rendered: "$312,450" },
+        "Last Year": { value: 274800, rendered: "$274,800" },
+      },
+      "long_metrics.total_gross_margin": {
+        Current: { value: 162474, rendered: "$162,474" },
+        "Last Year": { value: 140148, rendered: "$140,148" },
       },
       "long_metrics.gross_margin_percentage": {
         Current: { value: 0.52, rendered: "52.0%" },
@@ -3009,84 +3597,118 @@ export const STARTER_OUTLINE_QUERY_RESPONSE: any = {
       },
     },
     {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Women|Dresses|Calvin Klein" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Women|Dresses" },
-      "dim_product_hierarchy.member_label": { value: "Calvin Klein" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Women|Dresses|Calvin Klein" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 265000, rendered: "$265,000" },
-        "Last Year": { value: 224000, rendered: "$224,000" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 140450, rendered: "$140,450" },
-        "Last Year": { value: 116480, rendered: "$116,480" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.53, rendered: "53.0%" },
-        "Last Year": { value: 0.52, rendered: "52.0%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Women|Dresses|Ralph Lauren" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Women|Dresses" },
-      "dim_product_hierarchy.member_label": { value: "Ralph Lauren" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Women|Dresses|Ralph Lauren" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 220000, rendered: "$220,000" },
-        "Last Year": { value: 186000, rendered: "$186,000" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 111750, rendered: "$111,750" },
-        "Last Year": { value: 92620, rendered: "$92,620" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.508, rendered: "50.8%" },
-        "Last Year": { value: 0.498, rendered: "49.8%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "CAT:Women|Active" },
-      "dim_product_hierarchy.parent_id": { value: "DEPT:Women" },
+      "dim_product_hierarchy.member_id": { value: "CAT:Men|Active" },
+      "dim_product_hierarchy.parent_id": { value: "DEPT:Men" },
       "dim_product_hierarchy.member_label": { value: "Active" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Women|Active" },
+      "dim_product_hierarchy.member_path": { value: "All Products|Men|Active" },
       "dim_product_hierarchy.level_num": { value: 2 },
       "dim_product_hierarchy.is_leaf": { value: "No" },
       "long_metrics.total_sale_price": {
-        Current: { value: 415400, rendered: "$415,400" },
-        "Last Year": { value: 367800, rendered: "$367,800" },
+        Current: { value: 264800, rendered: "$264,800" },
+        "Last Year": { value: 231100, rendered: "$231,100" },
       },
       "long_metrics.total_gross_margin": {
-        Current: { value: 206587, rendered: "$206,587" },
-        "Last Year": { value: 179454, rendered: "$179,454" },
+        Current: { value: 135048, rendered: "$135,048" },
+        "Last Year": { value: 113239, rendered: "$113,239" },
       },
       "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.497, rendered: "49.7%" },
-        "Last Year": { value: 0.488, rendered: "48.8%" },
-      },
-    },
-    {
-      "dim_product_hierarchy.member_id": { value: "BRAND:Women|Active|Nike" },
-      "dim_product_hierarchy.parent_id": { value: "CAT:Women|Active" },
-      "dim_product_hierarchy.member_label": { value: "Nike" },
-      "dim_product_hierarchy.member_path": { value: "All Products|Women|Active|Nike" },
-      "dim_product_hierarchy.level_num": { value: 3 },
-      "dim_product_hierarchy.is_leaf": { value: "Yes" },
-      "long_metrics.total_sale_price": {
-        Current: { value: 415400, rendered: "$415,400" },
-        "Last Year": { value: 367800, rendered: "$367,800" },
-      },
-      "long_metrics.total_gross_margin": {
-        Current: { value: 206587, rendered: "$206,587" },
-        "Last Year": { value: 179454, rendered: "$179,454" },
-      },
-      "long_metrics.gross_margin_percentage": {
-        Current: { value: 0.497, rendered: "49.7%" },
-        "Last Year": { value: 0.488, rendered: "48.8%" },
+        Current: { value: 0.51, rendered: "51.0%" },
+        "Last Year": { value: 0.49, rendered: "49.0%" },
       },
     },
   ],
 };
+
+/**
+ * Returns the starter outline QueryResponse for a given `CalculationsConfig`:
+ * - When `isCustomCalculationsConfig(calcConfig)` is `false` (no customer `calculations.strings.json`),
+ *   returns Bryan's `STARTER_OUTLINE_QUERY_RESPONSE` (Default eCommerce Demo Fallbacks).
+ * - When `isCustomCalculationsConfig(calcConfig)` is `true`, builds a customer-specific starter
+ *   outline from `calcConfig.hierarchies` and `calcConfig.measures` so zero e-commerce nodes
+ *   (`All Products`, `Men`, `Women`) or e-commerce measures (`Total Sale Price`, `Total Gross Margin`)
+ *   ever appear in the UI.
+ */
+export function getStarterOutlineForConfig(
+  calcConfig?: CalculationsConfig,
+  hierarchyId?: string,
+): any {
+  if (!isCustomCalculationsConfig(calcConfig)) {
+    return STARTER_OUTLINE_QUERY_RESPONSE;
+  }
+  const activeHierarchy =
+    (calcConfig?.hierarchies || []).find((h) => h.id === hierarchyId) ||
+    calcConfig?.hierarchies?.[0];
+  const viewPrefix = activeHierarchy?.view || "dim_product_hierarchy";
+  const starterNodes = getStarterHierarchyNodesForId(
+    activeHierarchy?.id || hierarchyId || "product",
+    calcConfig,
+  );
+  const configuredMeasures =
+    calcConfig?.measures && calcConfig.measures.length > 0
+      ? calcConfig.measures.map((m) => ({
+          name: m.fieldName || m.id,
+          label: m.label || m.label_short || m.id,
+          label_short: m.label_short || m.label || m.id,
+          type: "number",
+          is_numeric: true,
+          value_format: m.value_format || m.format || "$#,##0",
+        }))
+      : [];
+
+  const data = starterNodes.map((node) => {
+    const row: Record<string, any> = {
+      [`${viewPrefix}.member_id`]: { value: node.memberId },
+      [`${viewPrefix}.parent_id`]: { value: node.parentId },
+      [`${viewPrefix}.member_label`]: { value: node.label },
+      [`${viewPrefix}.member_path`]: { value: node.path },
+      [`${viewPrefix}.level_num`]: { value: node.level },
+      [`${viewPrefix}.is_leaf`]: { value: node.isLeaf ? "Yes" : "No" },
+    };
+    for (const m of configuredMeasures) {
+      row[m.name] = {
+        Current: { value: 0, rendered: formatEssbaseValue(0, m.value_format) },
+        "Last Year": { value: 0, rendered: formatEssbaseValue(0, m.value_format) },
+      };
+    }
+    return row;
+  });
+
+  return {
+    fields: {
+      dimension_like: [
+        { name: `${viewPrefix}.member_id`, label: "Member ID", type: "string" },
+        { name: `${viewPrefix}.parent_id`, label: "Parent ID", type: "string" },
+        { name: `${viewPrefix}.member_label`, label: "Member Name", type: "string" },
+        { name: `${viewPrefix}.member_path`, label: "Member Path", type: "string" },
+        { name: `${viewPrefix}.level_num`, label: "Level", type: "number" },
+        { name: `${viewPrefix}.is_leaf`, label: "Is Leaf", type: "yesno" },
+      ],
+      measure_like: configuredMeasures,
+      pivots: [
+        { name: "long_metrics.current_period", label: "Current Period", type: "string" },
+      ],
+    },
+    pivots: [
+      {
+        key: "Current",
+        data: { "long_metrics.current_period": "Current" },
+        sort_values: { "long_metrics.current_period": "Current" },
+        metadata: {
+          "long_metrics.current_period": { value: "Current", rendered: "Current" },
+        },
+        is_total: false,
+      },
+      {
+        key: "Last Year",
+        data: { "long_metrics.current_period": "Last Year" },
+        sort_values: { "long_metrics.current_period": "Last Year" },
+        metadata: {
+          "long_metrics.current_period": { value: "Last Year", rendered: "Last Year" },
+        },
+        is_total: false,
+      },
+    ],
+    sorts: [],
+    data,
+  };
+}
