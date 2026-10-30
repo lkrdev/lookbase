@@ -7,6 +7,11 @@
     "exclude_tag": "lookbase:exclude",
     "include_tag": "lookbase:include"
   },
+  "hierarchy_discovery": {
+    "source": "lookml",
+    "hierarchy_id_field": "dim_product_hierarchy.hierarchy_id",
+    "outline_explore": "long_metrics"
+  },
   "measure_pdt_views": {
     "Total Sale Price": "stacked_total_sale_price",
     "Total Gross Margin": "stacked_total_gross_margin"

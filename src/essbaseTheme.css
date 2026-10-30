@@ -419,6 +419,7 @@ body {
   z-index: 9999 !important;
   padding: 4px 8px !important;
   font-size: 11px !important;
+  background-color: #ffffff !important;
   border: 1px solid #8ea9db !important;
   border-radius: 3px !important;
   box-shadow: 0 3px 8px rgba(15, 23, 42, 0.18) !important;
@@ -459,11 +460,17 @@ body {
   right: 25px !important;
 }
 
-.lookbase-grid-area #clearSortsBtn,
-.lookbase-grid-area #resetEditsBtn,
-.lookbase-grid-area #toggleSubtotalsBtn,
 .lookbase-grid-area #downloadButton {
   right: 46px !important;
+}
+
+.lookbase-grid-area #resetEditsBtn {
+  display: none !important;
+}
+
+.lookbase-grid-area #clearSortsBtn,
+.lookbase-grid-area #toggleSubtotalsBtn {
+  right: 67px !important;
 }
 
 /* Stacked Bottom-Right Stateful Toasts (lookbase-toasts skill) */
@@ -688,4 +695,69 @@ body {
   background: #f1f5f9 !important;
   color: #0f172a !important;
   border-color: #94a3b8 !important;
+}
+
+@keyframes lookbase-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.lookbase-skeleton-bar {
+  display: inline-block;
+  height: 11px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
+  background-size: 200% 100%;
+  animation: lookbase-shimmer 1.4s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+.lookbase-skeleton-grid {
+  padding: 0;
+  width: 100%;
+}
+
+.lookbase-skeleton-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.lookbase-skeleton-table th {
+  background-color: #305496;
+  color: #ffffff;
+  border: 1px solid #1f3864;
+  padding: 6px 10px;
+  text-align: right;
+  font-weight: 600;
+}
+
+.lookbase-skeleton-table th:first-child {
+  text-align: left;
+  width: 240px;
+}
+
+.lookbase-skeleton-table td {
+  border: 1px solid #d0d7e5;
+  padding: 6px 10px;
+  text-align: right;
+  background: #ffffff;
+}
+
+.lookbase-skeleton-table td:first-child {
+  text-align: left;
+  background: #d9e1f2;
+  border-color: #b4c6e7;
+}
+
+.lookbase-skeleton-table tr.skeleton-root td:first-child {
+  background: #c5d9f1;
+}
+
+.lookbase-skeleton-table tr.skeleton-root td {
+  background: #f2f5fb;
 }

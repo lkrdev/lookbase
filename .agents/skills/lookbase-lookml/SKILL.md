@@ -7,26 +7,24 @@ description: >
   `ALTER BI_CAPACITY` pinning, and BigQuery `CLONE` zero-copy sandboxes for LookBase.
 ---
 
-# Skill: LookBase OLAP Cube, `member_id`/`parent_id` Hierarchies & BigQuery `CLONE` Sandboxes (`lookbase-lookml`)
+# LookBase OLAP cube, member_id/parent_id hierarchies, and BigQuery CLONE sandboxes
 
-This skill builds directly on [`long-metrics-table`](../long-metrics-table/SKILL.md) to turn a narrow Long Metrics table into a full multidimensional OLAP cube with `(member_id, parent_id)` outline hierarchies, modular per-measure PDTs, on-demand cube rebuilds, BI Engine pinning, and BigQuery `CLONE` writeback sandboxes.
+This guide builds on [long-metrics-table](../long-metrics-table/SKILL.md) to turn a narrow Long Metrics table into a multidimensional OLAP cube with `(member_id, parent_id)` outline hierarchies, modular per-measure PDTs, on-demand cube rebuilds, BI Engine pinning, and BigQuery `CLONE` writeback sandboxes.
 
-Always read [`.agents/skills/long-metrics-table/SKILL.md`](../long-metrics-table/SKILL.md) first for the core `explore_source` window functions, `source_parameter` filtering, and `current_period` alignment rules.
+Read [.agents/skills/long-metrics-table/SKILL.md](../long-metrics-table/SKILL.md) first for the core `explore_source` window functions, `source_parameter` filtering, and `current_period` alignment rules.
 
----
+## Modeling member_id and parent_id hierarchies
 
-## 1. Modeling `member_id` and `parent_id` Hierarchies (`UNNEST` Closure Bridge & `WITH RECURSIVE`)
-
-The base `long-metrics-table` pattern only exposes flat columns (`department`, `category`, `brand`) and a flat `metric` string. It lacks **`member_id` and `parent_id`**, which LookBase requires to:
-1. Zoom in/out on any node by filtering `WHERE parent_id = '<clicked_member_id>'` without changing the query's `fields` list.
-2. Query multiple expanded branches at different depths in a single SQL query without Looker needing `N` separate subtotal queries.
+The base `long-metrics-table` pattern only exposes flat columns (`department`, `category`, `brand`) and a flat `metric` string. LookBase requires `member_id` and `parent_id` columns to:
+1. Zoom in and out on any node by filtering `WHERE parent_id = '<clicked_member_id>'` without changing the query's `fields` list.
+2. Query multiple expanded branches at different depths in a single SQL query without running $N$ separate subtotal queries.
 3. Apply unary consolidation operators (`+1`, `-1`, `0` ignore) across parent-child Account rollups.
 
-### A. Option 1: Fixed-Depth `UNNEST([STRUCT(...)])` Closure Bridge (`dim_product_hierarchy`)
+### Fixed-depth UNNEST([STRUCT(...)]) closure bridge
 When hierarchy levels come from fixed columns (`department` -> `category` -> `brand`), you can use `UNNEST([STRUCT(...)])` over `products` to emit one closure row per `(product_id, hierarchy_level)`.
 
-### A2. Option 2: Arbitrary-Depth / Jagged `WITH RECURSIVE` CTE Hierarchy (4–20 Levels)
-For ragged or arbitrary-depth parent-child hierarchies (`(member_id, parent_id)` edges up to 20 levels deep), use BigQuery's **`WITH RECURSIVE` CTE** with **`persist_for: "24 hours"`** (critical: BigQuery only allows `WITH RECURSIVE` at the top level of a `SELECT` or `CREATE TABLE AS SELECT`, never inside an inline `(WITH RECURSIVE ...)` subquery join!) to compute `level_num`, `member_path`, and `ancestor_ids`:
+### Arbitrary-depth WITH RECURSIVE CTE hierarchy (4-20 levels)
+For ragged or arbitrary-depth parent-child hierarchies (`(member_id, parent_id)` edges up to 20 levels deep), use BigQuery's `WITH RECURSIVE` CTE with `persist_for: "24 hours"`. BigQuery only allows `WITH RECURSIVE` at the top level of a `SELECT` or `CREATE TABLE AS SELECT`, never inside an inline `(WITH RECURSIVE ...)` subquery join, so persisting the view as a PDT is required to compute `level_num`, `member_path`, and `ancestor_ids`:
 
 ```lookml
 view: dim_product_hierarchy {
@@ -117,7 +115,7 @@ view: dim_product_hierarchy {
 }
 ```
 
-### B. Account / Metric Outline Bridge (`dim_account_hierarchy`)
+### Account and metric outline bridge
 Similarly, map atomic `long_metrics.metric` values into a parent-child Chart of Accounts with unary `sign_weight` (`+1` addition, `-1` subtraction):
 
 ```lookml
@@ -146,9 +144,10 @@ view: dim_account_hierarchy {
 }
 ```
 
-### C. Preventing Fan-Out & Avoiding Full-Table Queries (Looker Row Limits)
-Never query the full `WITH RECURSIVE` hierarchy table in one unfiltered query—a 10,000-node hierarchy pivoted across time periods will exceed Looker's 5,000-row limit.
-1. **Default Root Guard (`sql_always_where`):** If `dim_product_hierarchy` is joined without an explicit `member_id`, `parent_id`, or `level_num` filter, default to `member_id = 'ALL'`:
+### Preventing fan-out and avoiding full-table queries
+Never query the full `WITH RECURSIVE` hierarchy table in one unfiltered query. A 10,000-node hierarchy pivoted across time periods will exceed Looker's 5,000-row limit.
+
+1. Add a default root guard in `sql_always_where` so that if `dim_product_hierarchy` is joined without an explicit `member_id`, `parent_id`, or `level_num` filter, the query defaults to `member_id = 'ALL'`:
 ```lookml
 {% if dim_product_hierarchy._in_query %}
   {% if dim_product_hierarchy.member_id._is_selected or dim_product_hierarchy.member_id._is_filtered or dim_product_hierarchy.parent_id._is_filtered or dim_product_hierarchy.level_num._is_filtered %}
@@ -160,35 +159,25 @@ Never query the full `WITH RECURSIVE` hierarchy table in one unfiltered query—
   1=1
 {% endif %}
 ```
-2. **Incremental Expansion (`WHERE parent_id = '<clicked_member_id>'`):**
-   - Clicking `[+]` or double-clicking a node (`member_id = "DEPT:Men"`) runs `core40SDK.run_inline_query` with `filters: { ...baseFilters, "dim_product_hierarchy.parent_id": "DEPT:Men" }`, fetching only the direct children of that node.
-3. **Saving & Restoring Multi-Branch Expansions on Load (`restoreSavedOutlineExpansion`):**
-   - Persist both `expandSubtotals` (path strings) and `savedExpandedMemberIds` (`["ROOT", "ALL", "DEPT:Men", "CAT:Men|Jeans", ...]`) in URL query parameters (`?expanded=...`) and Looker User Artifacts (`user_<id>_lookbase_prefs`).
-   - On initial load, group `["ROOT", "ALL", ...savedExpandedMemberIds]` into chunks (e.g., 20 parent IDs per batch so each query returns well under Looker's row limit) and fire them **all together on load** using Looker's comma-separated `IN` filter (`parent_id: "ROOT,ALL,DEPT:Men,CAT:Men|Jeans"`) wrapped in `Promise.all(...)`, then merge all returned rows by `member_id` in a single pass.
-4. **Left-Hand Metric & Calculation Autocomplete:**
-   - When Metrics / Accounts are placed down the Left-Hand Side (Column A) or inside the outline header, provide an inline autocomplete combobox (`searchAutocompleteItems`) that searches across:
-     - LookML measures (`long_metrics.total_sale_price`, `long_metrics.total_gross_margin`, `long_metrics.gross_margin_percentage`),
-     - Project-defined two-pass calculations (`calculations.strings.json` `two_pass_metrics` and `column_calcs`),
-     - Outline hierarchy members (`member_id` / `member_label`), and
-     - Ad-hoc multidimensional formulas (`=MEMBER(...)`, `=VAR(...)`, `=VARPER(...)`, `=PARENTVAL(...)`, `=GETVALUE(...)`).
+2. Expand branches incrementally with `WHERE parent_id = '<clicked_member_id>'`. Clicking `[+]` or double-clicking a node (`member_id = "DEPT:Men"`) runs `core40SDK.run_inline_query` with `filters: { ...baseFilters, "dim_product_hierarchy.parent_id": "DEPT:Men" }`, fetching only the direct children of that node.
+3. Save and restore multi-branch expansions on load (`restoreSavedOutlineExpansion`). Persist both `expandSubtotals` (path strings) and `savedExpandedMemberIds` (`["ROOT", "ALL", "DEPT:Men", "CAT:Men|Jeans", ...]`) in URL query parameters (`?expanded=...`) and Looker User Artifacts (`user_<id>_lookbase_prefs`). On initial load, group `["ROOT", "ALL", ...savedExpandedMemberIds]` into chunks of 20 parent IDs per batch so each query returns well under Looker's row limit. Run the batches in parallel using Looker's comma-separated `IN` filter (`parent_id: "ROOT,ALL,DEPT:Men,CAT:Men|Jeans"`) inside `Promise.all(...)`, then merge all returned rows by `member_id` in a single pass.
+4. Provide left-hand metric and calculation autocomplete (`searchAutocompleteItems`) when metrics or accounts are placed down Column A or inside the outline header. The autocomplete searches across LookML measures (`long_metrics.total_sale_price`, `long_metrics.total_gross_margin`, `long_metrics.gross_margin_percentage`), project-defined two-pass calculations (`calculations.strings.json` `two_pass_metrics` and `column_calcs`), outline hierarchy members (`member_id` and `member_label`), and ad-hoc multidimensional formulas (`=MEMBER(...)`, `=VAR(...)`, `=VARPER(...)`, `=PARENTVAL(...)`, `=GETVALUE(...)`).
 
----
+## Modular per-measure view architecture and PDT strategy
 
-## 2. Modular Per-Measure View Architecture & PDT Strategy
+A single measure across 3 time grains (`Daily`, `Monthly`, `Quarterly`), 13 rolling timeframes, and 4 period alignments (`Current`, `Yesterday`, `Last Month`, `Last Year`) produces more than 30 `UNION ALL` branches per measure.
 
-A single measure across 3 time grains (`Daily`, `Monthly`, `Quarterly`), ~13 rolling timeframes, and 4 period alignments (`Current`, `Yesterday`, `Last Month`, `Last Year`) produces **30+ `UNION ALL` branches per measure**.
+### Separate view file per measure
+- `base_fields.view.lkml` holds shared extension views (`base_fields`, `day_agg_fields`, `month_agg_fields`, `quarter_agg_fields`, `booleans`), `dim_products`, `dim_product_hierarchy`, and `dim_account_hierarchy`.
+- `metric_total_sale_price.view.lkml` defines `metric_total_sale_price` (Daily), `metric_total_sale_price_month_aggregated` (Monthly), `metric_total_sale_price_quarter_aggregated` (Quarterly), and `stacked_total_sale_price` (all `UNION ALL` branches for `'Total Sale Price'`).
+- `metric_total_gross_margin.view.lkml` defines the same 4 views for `'Total Gross Margin'`.
 
-### Rule A: Separate View File Per Measure (`metric_<measure_name>.view.lkml`)
-- `base_fields.view.lkml` — shared extension views (`base_fields`, `day_agg_fields`, `month_agg_fields`, `quarter_agg_fields`, `booleans`), `dim_products`, `dim_product_hierarchy`, and `dim_account_hierarchy`.
-- `metric_total_sale_price.view.lkml` — defines `metric_total_sale_price` (Daily), `metric_total_sale_price_month_aggregated` (Monthly), `metric_total_sale_price_quarter_aggregated` (Quarterly), and `stacked_total_sale_price` (all `UNION ALL` branches for `'Total Sale Price'`).
-- `metric_total_gross_margin.view.lkml` — defines the same 4 views for `'Total Gross Margin'`.
-
-### Rule B: Materialize Intermediate Views as PDTs When `UNION ALL` Grows Large
+### Materialize intermediate views as PDTs when UNION ALL grows large
 Add `persist_for: "24 hours"` (or `datagroup_trigger`) to:
-1. Each base `metric_<measure>` daily/monthly/quarterly NDT (so window functions run **once** per measure instead of being inlined 20+ times as CTEs), AND
-2. Each `stacked_<measure>` view once total `UNION ALL` branches exceed ~20 branches.
+1. Each base `metric_<measure>` daily, monthly, and quarterly NDT so window functions run once per measure instead of being inlined 20+ times as CTEs.
+2. Each `stacked_<measure>` view once total `UNION ALL` branches exceed roughly 20 branches.
 
-### Rule C: Final Cube View Unions the Per-Measure Stacked Views (`long_metrics.view.lkml`)
+### Union per-measure stacked views in the final cube view
 ```lookml
 view: long_metrics_base {
   derived_table: {
@@ -202,22 +191,14 @@ view: long_metrics_base {
 }
 ```
 
----
+## On-demand cube rebuilds
 
-## 3. On-Demand Cube Rebuilds (`rebuild_pdts: true` & `start_pdt_build`)
+1. For synchronous rebuilds on query, call `core40SDK.run_inline_query({ result_format: "json_detail", rebuild_pdts: true, cache: false, body })`. Running this against `long_metrics` or `long_metrics_base` rebuilds `long_metrics_base` and all upstream `stacked_<measure>` PDTs (`CALC ALL`), while running it against `stacked_total_sale_price` rebuilds only that measure's PDT (`CALC Measure`).
+2. For asynchronous background materialization, call `core40SDK.start_pdt_build({ model_name: "lookbase", view_name: "long_metrics_base", force_rebuild: true })` and poll with `check_pdt_build`.
 
-1. **Synchronous Rebuild on Query (`run_inline_query` with `rebuild_pdts: true`):**
-   - **Full Cube Rebuild (`CALC ALL`):** `core40SDK.run_inline_query({ result_format: "json_detail", rebuild_pdts: true, cache: false, body })` on `long_metrics` rebuilds `long_metrics_base` and upstream `stacked_<measure>` PDTs.
-   - **Single-Measure Rebuild (`CALC Measure`):** Querying `stacked_total_sale_price` with `rebuild_pdts: true` rebuilds only that measure's PDT.
-2. **Asynchronous Background Materialization (`start_pdt_build` + `check_pdt_build`):**
-   - `core40SDK.start_pdt_build({ model_name: "lookbase", view_name: "long_metrics_base", force_rebuild: true })`.
-
----
-
-## 4. BigQuery BI Engine Pinning & `CLONE` Sandboxes
+## BigQuery BI Engine pinning and CLONE sandboxes
 
 Reference `${long_metrics_base.SQL_TABLE_NAME}` inside a `persist_for: "1 second"` `create_process` view (`lookbase_writeback`) triggered via `run_inline_query(..., rebuild_pdts: true, cache: false)`:
-- **`init_sandbox`:** `CREATE OR REPLACE TABLE ${long_metrics_base.SQL_TABLE_NAME}_sandbox_{{ _user_attributes['id'] }} CLONE ${long_metrics_base.SQL_TABLE_NAME}` (~1s, $0 storage).
-- **`write_delta`:** Proportional `INSERT INTO ... SELECT` weighted by `SAFE_DIVIDE(value, NULLIF(SUM(value) OVER (), 0))` (supports writing deltas by `member_id` via `dim_product_hierarchy` or by `department`).
-- **`compact_and_promote` / `clone_version`:** Compacts deltas via `GROUP BY` or zero-copy clones between named versions (`fcst_v1`, `fcst_v2`, `budget_final`) and pins via `ALTER BI_CAPACITY`.
-
+- `init_sandbox` resets the current user's delta partition in `long_metrics_overrides` (or runs `CREATE OR REPLACE TABLE ... CLONE` when physical table cloning is used).
+- `write_delta` executes a proportional `INSERT INTO ... SELECT` weighted by `SAFE_DIVIDE(value, NULLIF(SUM(value) OVER (), 0))`, supporting delta writebacks by `member_id` via `dim_product_hierarchy` or by `department`.
+- `compact_and_promote` and `clone_version` compact deltas via `GROUP BY` or copy rows between named versions (`fcst_v1`, `fcst_v2`, `budget_final`), while `long_metrics_base` pins shared PDTs to BI Engine via `ALTER BI_CAPACITY`.
