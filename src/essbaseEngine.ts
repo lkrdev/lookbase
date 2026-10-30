@@ -1,6 +1,7 @@
 import SSF from "ssf";
 
 export interface ParentChildHierarchyConfig {
+  hierarchyIdField?: string;
   memberIdField: string;
   parentIdField: string;
   labelField: string;
@@ -8,6 +9,19 @@ export interface ParentChildHierarchyConfig {
   levelField: string;
   isLeafField: string;
   rootParentIds?: string[];
+}
+
+export type HierarchyDiscoverySource = "lookml" | "json";
+
+export interface HierarchyDiscoveryConfig {
+  /**
+   * "lookml": pulls 100% of hierarchies from the LookML Explore / outline query (`dim_product_hierarchy` L0/L1 rows and `group_label` dimensions), ignoring `hierarchies` in `.json`.
+   * "json": pulls 100% of hierarchies from the `hierarchies` array in `lookbase.config.json` / `calculations.strings.json`, without querying LookML for hierarchy definitions.
+   */
+  source?: HierarchyDiscoverySource | "explore" | "query";
+  explore?: string;
+  outline_explore?: string;
+  hierarchy_id_field?: string;
 }
 
 export interface TwoPassMetricConfig {
@@ -42,6 +56,12 @@ export interface FieldDiscoveryConfig {
   mode?: "all_except_excluded" | "include_tagged";
   exclude_tag?: string;
   include_tag?: string;
+  /**
+   * Optional shorthand for `hierarchy_discovery.source`:
+   * - "lookml": pull 100% of hierarchies from LookML Explore / outline query.
+   * - "json": pull 100% of hierarchies from `hierarchies` in `.json`.
+   */
+  hierarchy_source?: HierarchyDiscoverySource | "explore" | "query";
 }
 
 export interface LookBaseSettingsConfig {
@@ -203,22 +223,182 @@ export function isCustomCalculationsConfig(calcConfig?: CalculationsConfig | nul
 }
 
 /**
- * Discovers all available dimensional hierarchies from LookML Explore metadata.
- * When a customer-specific `calculations.strings.json` is present (`isCustomCalculationsConfig(calcConfig)`
- * or `calcConfig?.hierarchies?.length`), completely replaces `BUILTIN_HIERARCHY_CATALOG` so default
- * e-commerce hierarchies never appear in the UI.
+ * Resolves whether dimensional hierarchies should be pulled 100% from LookML (`"lookml"`)
+ * or 100% from the `.json` configuration file (`"json"`).
+ *
+ * Precedence:
+ * 1. Explicit `hierarchy_discovery.source` / `hierarchy_discovery` / `hierarchy_source` / `field_discovery.hierarchy_source`
+ *    (`"lookml"` | `"explore"` | `"query"` -> `"lookml"`, `"json"` -> `"json"`).
+ * 2. Fallback: `"json"` when `calcConfig.hierarchies` is non-empty, otherwise `"lookml"`.
+ */
+export function resolveHierarchyDiscoverySource(
+  calcConfig?: CalculationsConfig | null,
+): HierarchyDiscoverySource {
+  const hd = calcConfig?.hierarchy_discovery;
+  const raw =
+    typeof hd === "string"
+      ? hd
+      : hd?.source ||
+        calcConfig?.hierarchy_source ||
+        calcConfig?.field_discovery?.hierarchy_source;
+  const normalized = String(raw || "").trim().toLowerCase();
+  if (normalized === "lookml" || normalized === "explore" || normalized === "query") {
+    return "lookml";
+  }
+  if (normalized === "json") {
+    return "json";
+  }
+  if (Array.isArray(calcConfig?.hierarchies) && calcConfig!.hierarchies!.length > 0) {
+    return "json";
+  }
+  return "lookml";
+}
+
+/**
+ * Builds `LookBaseHierarchyDef[]` 100% from LookML `(hierarchy_id, member_id, parent_id, member_label, level_num)`
+ * outline rows (e.g. `level_num IN (0, 1)` from `dim_outline_hierarchy` / `dim_product_hierarchy`).
+ */
+export function buildHierarchiesFromOutlineRows(
+  rows: Record<string, any>[],
+  pcConfig?: Partial<ParentChildHierarchyConfig> | null,
+  hierarchyIdField = "dim_product_hierarchy.hierarchy_id",
+  defaultHierarchyId?: string,
+): LookBaseHierarchyDef[] {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const memberField = pcConfig?.memberIdField || "dim_product_hierarchy.member_id";
+  const parentField = pcConfig?.parentIdField || "dim_product_hierarchy.parent_id";
+  const labelField = pcConfig?.labelField || "dim_product_hierarchy.member_label";
+  const levelField = pcConfig?.levelField || "dim_product_hierarchy.level_num";
+  const hField = pcConfig?.hierarchyIdField || hierarchyIdField;
+
+  const unwrap = (row: Record<string, any>, field: string): any => {
+    if (!row) return undefined;
+    const cell = row[field];
+    if (cell !== null && typeof cell === "object" && "value" in cell) return cell.value;
+    if (cell !== undefined) return cell;
+    const suffix = field.split(".").pop() || field;
+    for (const [k, v] of Object.entries(row)) {
+      if (k === suffix || k.endsWith(`.${suffix}`)) {
+        return v !== null && typeof v === "object" && "value" in v ? v.value : v;
+      }
+    }
+    return undefined;
+  };
+
+  const byHierarchy = new Map<
+    string,
+    { rootLabel?: string; l1Nodes: Array<{ memberId: string; label: string }> }
+  >();
+
+  for (const r of rows) {
+    const rawHId = unwrap(r, hField);
+    const hId = String(rawHId ?? "").trim();
+    if (!hId) continue;
+    const memberId = String(unwrap(r, memberField) ?? "").trim();
+    const parentId = String(unwrap(r, parentField) ?? "").trim();
+    const label = String(unwrap(r, labelField) ?? memberId).trim();
+    const levelRaw = unwrap(r, levelField);
+    const level = levelRaw !== undefined && levelRaw !== null ? Number(levelRaw) : NaN;
+
+    if (!byHierarchy.has(hId)) {
+      byHierarchy.set(hId, { l1Nodes: [] });
+    }
+    const entry = byHierarchy.get(hId)!;
+    if (level === 0 || memberId === "ALL" || parentId === "ROOT") {
+      entry.rootLabel = label || hId;
+    } else if (level === 1 || parentId === "ALL") {
+      if (memberId && !entry.l1Nodes.some((n) => n.memberId === memberId)) {
+        entry.l1Nodes.push({ memberId, label: label || memberId });
+      }
+    }
+  }
+
+  const exploreView = hField.split(".")[0] || "dim_product_hierarchy";
+  const defs: LookBaseHierarchyDef[] = [];
+  for (const [hId, info] of byHierarchy.entries()) {
+    const rootLabel =
+      info.rootLabel ||
+      hId
+        .split("_")
+        .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ""))
+        .join(" ");
+    const topL1 = info.l1Nodes.slice(0, 4);
+    defs.push({
+      id: hId,
+      label: rootLabel,
+      shortLabel: rootLabel,
+      rootLabel,
+      description: `Discovered from LookML Outline (${exploreView}.${hId})`,
+      levelLabels: [
+        rootLabel,
+        "Level 1",
+        "Level 2",
+        "Level 3",
+        "Level 4",
+        "Level 5",
+        "Level 6",
+      ],
+      defaultExpandedIds: ["ROOT", "ALL", ...topL1.map((n) => n.memberId)],
+      defaultExpandedPaths: [
+        rootLabel,
+        ...topL1.map((n) => `${rootLabel}|${n.label}`),
+      ],
+      sourceType: "cube",
+      exploreView,
+      preloadedByDefault: true,
+    });
+  }
+
+  defs.sort((a, b) => {
+    if (defaultHierarchyId) {
+      if (a.id === defaultHierarchyId) return -1;
+      if (b.id === defaultHierarchyId) return 1;
+    }
+    if (a.id === "total_ihg" || a.id === "product") return -1;
+    if (b.id === "total_ihg" || b.id === "product") return 1;
+    return a.label.localeCompare(b.label);
+  });
+
+  return defs;
+}
+
+/**
+ * Discovers dimensional hierarchies according to `resolveHierarchyDiscoverySource(calcConfig)`:
+ * - `"json"`: returns 100% from `calcConfig.hierarchies` in `.json` (no LookML discovery).
+ * - `"lookml"`: returns 100% from LookML (`outlineHierarchyRows` + `exploreMeta.fields.dimensions` `group_label` sets),
+ *   ignoring `calcConfig.hierarchies` in `.json`.
  */
 export function discoverHierarchiesFromExplore(
   exploreMeta: any,
   calcConfig?: CalculationsConfig | null,
+  outlineHierarchyRows?: Record<string, any>[],
 ): LookBaseHierarchyDef[] {
   const isCustom = isCustomCalculationsConfig(calcConfig);
-  const catalog: LookBaseHierarchyDef[] =
-    Array.isArray(calcConfig?.hierarchies) && calcConfig!.hierarchies!.length > 0
-      ? [...calcConfig!.hierarchies!]
-      : isCustom
-        ? []
-        : [...BUILTIN_HIERARCHY_CATALOG];
+  const source = resolveHierarchyDiscoverySource(calcConfig);
+
+  if (source === "json") {
+    if (Array.isArray(calcConfig?.hierarchies) && calcConfig!.hierarchies!.length > 0) {
+      return [...calcConfig!.hierarchies!];
+    }
+    return isCustom ? [] : [...BUILTIN_HIERARCHY_CATALOG];
+  }
+
+  // source === "lookml": pull 100% from LookML (outline query rows + Explore group_label dimensions)
+  const hd =
+    calcConfig?.hierarchy_discovery && typeof calcConfig.hierarchy_discovery === "object"
+      ? calcConfig.hierarchy_discovery
+      : undefined;
+  const hierarchyIdField =
+    hd?.hierarchy_id_field ||
+    calcConfig?.parent_child_hierarchy?.hierarchyIdField ||
+    "dim_product_hierarchy.hierarchy_id";
+  const fromOutline = buildHierarchiesFromOutlineRows(
+    outlineHierarchyRows || [],
+    calcConfig?.parent_child_hierarchy,
+    hierarchyIdField,
+    calcConfig?.initial_state?.default_hierarchy,
+  );
+  const catalog: LookBaseHierarchyDef[] = [...fromOutline];
   const seenIds = new Set(catalog.map((h) => h.id));
   const rawDims: any[] = Array.isArray(exploreMeta?.fields?.dimensions)
     ? exploreMeta.fields.dimensions
@@ -261,7 +441,85 @@ export function discoverHierarchiesFromExplore(
       preloadedByDefault: false,
     });
   }
+  if (catalog.length === 0 && !isCustom) {
+    return [...BUILTIN_HIERARCHY_CATALOG];
+  }
   return catalog;
+}
+
+/**
+ * Resolves hierarchies according to `resolveHierarchyDiscoverySource(calcConfig)`:
+ * - `"json"`: returns 100% from `calcConfig.hierarchies` in `.json` without running any LookML query.
+ * - `"lookml"`: queries `level_num IN (0, 1)` from the LookML outline hierarchy (`dim_product_hierarchy.hierarchy_id`)
+ *   and combines with any LookML Explore `group_label` dimension hierarchies, returning 100% from LookML.
+ */
+export async function fetchHierarchiesFromLookmlOutline(
+  core40SDK: any,
+  model: string,
+  exploreMeta: any,
+  calcConfig?: CalculationsConfig | null,
+): Promise<LookBaseHierarchyDef[]> {
+  const source = resolveHierarchyDiscoverySource(calcConfig);
+  if (source === "json") {
+    return discoverHierarchiesFromExplore(exploreMeta, calcConfig);
+  }
+
+  let outlineRows: Record<string, any>[] = [];
+  if (core40SDK && typeof core40SDK.run_inline_query === "function") {
+    const hd =
+      calcConfig?.hierarchy_discovery && typeof calcConfig.hierarchy_discovery === "object"
+        ? calcConfig.hierarchy_discovery
+        : undefined;
+    const pc =
+      calcConfig?.parent_child_hierarchy || DEFAULT_CALCULATIONS_CONFIG.parent_child_hierarchy!;
+    const hierarchyIdField =
+      hd?.hierarchy_id_field || pc.hierarchyIdField || "dim_product_hierarchy.hierarchy_id";
+    const primaryView =
+      hd?.outline_explore || hd?.explore || calcConfig?.explore || "long_metrics";
+    const fallbackView = hierarchyIdField.split(".")[0] || "dim_product_hierarchy";
+    const candidateViews = Array.from(new Set([primaryView, fallbackView]));
+    const queryModel = model || calcConfig?.model || "lookbase";
+
+    for (const viewName of candidateViews) {
+      try {
+        const raw = await core40SDK.ok(
+          core40SDK.run_inline_query({
+            result_format: "json",
+            body: {
+              model: queryModel,
+              view: viewName,
+              fields: [
+                hierarchyIdField,
+                pc.memberIdField,
+                pc.parentIdField,
+                pc.labelField,
+                pc.levelField,
+              ],
+              filters: {
+                [pc.levelField]: "0,1",
+              },
+              sorts: [hierarchyIdField, pc.levelField, pc.labelField],
+              limit: "500",
+            },
+          }),
+        );
+        const parsed = parseSdkJson(raw);
+        const rows = Array.isArray(parsed?.data)
+          ? parsed.data
+          : Array.isArray(parsed)
+            ? parsed
+            : [];
+        if (rows.length > 0) {
+          outlineRows = rows;
+          break;
+        }
+      } catch {
+        // Try fallback view or continue with Explore metadata
+      }
+    }
+  }
+
+  return discoverHierarchiesFromExplore(exploreMeta, calcConfig, outlineRows);
 }
 
 export interface LookBaseUrlState {
@@ -307,9 +565,10 @@ export interface InitialUserStateConfig {
 export interface CalculationsConfig {
   model?: string;
   explore?: string;
-  writeback_explore?: string;
   base_pdt_view?: string;
   field_discovery?: FieldDiscoveryConfig;
+  hierarchy_source?: HierarchyDiscoverySource | "explore" | "query";
+  hierarchy_discovery?: HierarchyDiscoveryConfig | HierarchyDiscoverySource | "explore" | "query";
   measure_pdt_views?: Record<string, string>;
   settings?: LookBaseSettingsConfig;
   hierarchies?: LookBaseHierarchyDef[];
@@ -363,7 +622,6 @@ export const DEFAULT_QUICK_START_ACTIONS: QuickStartActionConfig[] = [
 export const DEFAULT_CALCULATIONS_CONFIG: CalculationsConfig = {
   model: "lookbase",
   explore: "long_metrics",
-  writeback_explore: "lookbase_writeback",
   base_pdt_view: "long_metrics_base",
   field_discovery: {
     mode: "all_except_excluded",
@@ -549,6 +807,11 @@ export function discoverFieldsFromExplore(
     return bySuffix?.name ? String(bySuffix.name) : fallback;
   };
 
+  pc.hierarchyIdField = findDimByTagOrSuffix(
+    "lookbase:hierarchy_id",
+    "hierarchy_id",
+    pc.hierarchyIdField || "dim_product_hierarchy.hierarchy_id",
+  );
   pc.memberIdField = findDimByTagOrSuffix("lookbase:member_id", "member_id", pc.memberIdField);
   pc.parentIdField = findDimByTagOrSuffix("lookbase:parent_id", "parent_id", pc.parentIdField);
   pc.labelField = findDimByTagOrSuffix("lookbase:member_label", "member_label", pc.labelField);
@@ -558,6 +821,7 @@ export function discoverFieldsFromExplore(
 
   // Auto-discover standard drill hierarchy dimensions (excluding parent-child & internal time/pivot fields)
   const pcFieldsSet = new Set([
+    pc.hierarchyIdField,
     pc.memberIdField,
     pc.parentIdField,
     pc.labelField,
@@ -1565,6 +1829,142 @@ export function withSdkTimeout<T>(
   });
 }
 
+const CSV_ARRAY_LEAF_KEYS = new Set([
+  "expanded_member_ids",
+  "expanded_paths",
+  "enabled_hierarchies",
+  "available_years",
+  "grid_measures",
+  "left_hand_metrics",
+  "expanded",
+  "metrics",
+  "settings_group_ids",
+  "settings_user_ids",
+  "rebuild_cube_group_ids",
+  "rebuild_cube_user_ids",
+  "levelLabels",
+  "defaultExpandedIds",
+  "defaultExpandedPaths",
+  "exploreDimensions",
+  "rootParentIds",
+  "hierarchy",
+]);
+
+const BOOLEAN_LEAF_KEYS = new Set([
+  "show_left_metrics_pane",
+  "show_tour_for_new_users",
+  "pane",
+  "restrict_settings",
+  "restrict_rebuild_cube",
+  "preloadedByDefault",
+]);
+
+const NUMBER_LEAF_KEYS = new Set(["solve_order", "sign"]);
+
+const OBJECT_ARRAY_SECTIONS = new Set([
+  "two_pass_metrics",
+  "column_calcs",
+  "pinned_rows",
+  "quick_start_actions",
+  "hierarchies",
+  "measures",
+]);
+
+/**
+ * Flattens a nested `CalculationsConfig` (`lookbase.config.json`) into a flat `Record<string, string>`
+ * dictionary suitable for Looker's `.strings.json` validator without any stringified JSON blobs.
+ */
+export function flattenConfigToStringsJson(config: Record<string, any>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const visit = (obj: any, prefix: string) => {
+    if (obj === null || obj === undefined) return;
+    if (Array.isArray(obj)) {
+      if (obj.length === 0) return;
+      if (obj.every((item) => typeof item !== "object" || item === null)) {
+        out[prefix] = obj.map((v) => String(v)).join(", ");
+        return;
+      }
+      obj.forEach((item, idx) => {
+        if (item && typeof item === "object") {
+          const itemKey = item.id ? String(item.id) : String(idx);
+          for (const [k, v] of Object.entries(item)) {
+            if (k === "id" && item.id) continue;
+            visit(v, `${prefix}.${itemKey}.${k}`);
+          }
+        }
+      });
+      return;
+    }
+    if (typeof obj === "object") {
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === "lookbase_config_json" || k === "_isCustomProjectConfig") continue;
+        visit(v, prefix ? `${prefix}.${k}` : k);
+      }
+      return;
+    }
+    out[prefix] = String(obj);
+  };
+  visit(config, "");
+  return out;
+}
+
+/**
+ * Unflattens flat dot-notation keys from `calculations.strings.json` (e.g. `"hierarchy_discovery.source": "lookml"`,
+ * `"two_pass_metrics.gm_pct.formula": "..."`) back into a structured `CalculationsConfig` object.
+ */
+export function unflattenStringsJsonToConfig(raw: Record<string, any>): Record<string, any> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const result: Record<string, any> = {};
+
+  const coerceLeaf = (leafKey: string, val: any): any => {
+    if (typeof val !== "string") return val;
+    if (CSV_ARRAY_LEAF_KEYS.has(leafKey)) {
+      return val
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    if (BOOLEAN_LEAF_KEYS.has(leafKey)) {
+      return val.trim().toLowerCase() === "true";
+    }
+    if (NUMBER_LEAF_KEYS.has(leafKey)) {
+      const n = Number(val);
+      return Number.isFinite(n) ? n : val;
+    }
+    return val;
+  };
+
+  for (const [fullKey, rawVal] of Object.entries(raw)) {
+    if (!fullKey.includes(".")) {
+      result[fullKey] = coerceLeaf(fullKey, rawVal);
+      continue;
+    }
+    const parts = fullKey.split(".");
+    let cur = result;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const seg = parts[i];
+      if (cur[seg] === undefined || typeof cur[seg] !== "object" || Array.isArray(cur[seg])) {
+        cur[seg] = {};
+      }
+      cur = cur[seg];
+    }
+    const lastKey = parts[parts.length - 1];
+    cur[lastKey] = coerceLeaf(lastKey, rawVal);
+  }
+
+  for (const section of OBJECT_ARRAY_SECTIONS) {
+    const val = result[section];
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      result[section] = Object.entries(val).map(([id, itemObj]) => ({
+        id,
+        ...(itemObj && typeof itemObj === "object" ? itemObj : {}),
+      }));
+    }
+  }
+
+  return result;
+}
+
 function normalizeParsedProjectCalculations(
   rawInput: any,
   projectId: string,
@@ -1588,13 +1988,18 @@ function normalizeParsedProjectCalculations(
   } else if (parsed.lookbase_config_json && typeof parsed.lookbase_config_json === "object") {
     embedded = parsed.lookbase_config_json;
   }
+  const unflattened = unflattenStringsJsonToConfig(parsed);
   const combined: Partial<CalculationsConfig> = {
-    ...parsed,
+    ...unflattened,
     ...embedded,
   };
   const hasValidConfigContent = Boolean(
     (typeof parsed.lookbase_config_json === "string" && parsed.lookbase_config_json.length > 2) ||
       (parsed.lookbase_config_json && typeof parsed.lookbase_config_json === "object") ||
+      combined.field_discovery ||
+      combined.hierarchy_discovery ||
+      combined.hierarchy_source ||
+      combined.initial_state ||
       (Array.isArray(combined.hierarchies) && combined.hierarchies.length > 0) ||
       (Array.isArray(combined.hierarchy) && combined.hierarchy.length > 0) ||
       (Array.isArray(combined.measures) && combined.measures.length > 0) ||
@@ -1612,10 +2017,11 @@ function normalizeParsedProjectCalculations(
     return {
       model: combined.model || projectId,
       explore: combined.explore || "long_metrics",
-      writeback_explore: combined.writeback_explore || "lookbase_writeback",
       base_pdt_view: combined.base_pdt_view || "long_metrics",
       field_discovery:
         combined.field_discovery || DEFAULT_CALCULATIONS_CONFIG.field_discovery,
+      hierarchy_source: combined.hierarchy_source,
+      hierarchy_discovery: combined.hierarchy_discovery,
       measure_pdt_views: combined.measure_pdt_views || {},
       settings: combined.settings || DEFAULT_LOOKBASE_SETTINGS,
       hierarchies: combined.hierarchies || [],
@@ -1762,7 +2168,6 @@ export async function loadProjectCalculations(
     return {
       model: projectId,
       explore: "long_metrics",
-      writeback_explore: "lookbase_writeback",
       base_pdt_view: "long_metrics",
       field_discovery: DEFAULT_CALCULATIONS_CONFIG.field_discovery,
       measure_pdt_views: {},
@@ -2787,47 +3192,6 @@ export async function rebuildCubePdt(
     rows: Array.isArray(res) ? res : [],
   };
 }
-
-/**
- * Executes a zero-backend BigQuery `CLONE` or proportional delta `INSERT` writeback action
- * via the `lookbase_writeback` `create_process` explore.
- */
-export async function executeEssbaseWriteback(
-  core40SDK: any,
-  model: string,
-  writebackExplore: string,
-  params: Record<string, string>,
-): Promise<any> {
-  if (!core40SDK) return null;
-  const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const filters: Record<string, string> = {
-    [`${writebackExplore}.request_id`]: reqId,
-  };
-  for (const [k, v] of Object.entries(params)) {
-    const qualifiedKey = k.includes(".") ? k : `${writebackExplore}.${k}`;
-    filters[qualifiedKey] = String(v);
-  }
-
-  return core40SDK.ok(
-    core40SDK.run_inline_query({
-      result_format: "json",
-      rebuild_pdts: true,
-      cache: false,
-      body: {
-        model,
-        view: writebackExplore,
-        fields: [
-          `${writebackExplore}.action_executed`,
-          `${writebackExplore}.completed_at`,
-        ],
-        filters,
-        limit: "1",
-      },
-    }),
-  );
-}
-
-export const executeLookBaseWriteback = executeEssbaseWriteback;
 
 /**
  * Restores a saved multi-branch outline expansion on initial load without querying the full

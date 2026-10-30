@@ -19,9 +19,10 @@ import {
   evaluateEssbaseFormula,
   evaluateLeftHandMetricRow,
   parseBiEngineTablesFromGeneratedSql,
-  executeEssbaseWriteback,
   fetchFullHierarchyCatalog,
+  fetchHierarchiesFromLookmlOutline,
   fetchHierarchyModalChildren,
+  flattenConfigToStringsJson,
   fetchOutlineChildren,
   formatEssbaseValue,
   formatMonthYearLabel,
@@ -40,6 +41,7 @@ import {
   parseLookBaseUrlState,
   projectOutlineRowsToReportTable,
   rebuildCubePdt,
+  resolveHierarchyDiscoverySource,
   resolveInitialLeftHandMetrics,
   restoreSavedOutlineExpansion,
   searchAutocompleteItems,
@@ -48,6 +50,7 @@ import {
   STARTER_HIERARCHY_CATALOG_NODES,
   STARTER_OUTLINE_QUERY_RESPONSE,
   toggleHierarchyNodeTriState,
+  unflattenStringsJsonToConfig,
   validateLookBaseSettings,
 } from "../src/essbaseEngine";
 import {
@@ -280,7 +283,7 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
 
     const mockSDK = {
       ok: jest.fn((p) => Promise.resolve(p)),
-      run_inline_query: jest.fn(() => [{ "lookbase_writeback.action_executed": "init_sandbox" }]),
+      run_inline_query: jest.fn(() => []),
     };
 
     await rebuildCubePdt(mockSDK, {
@@ -294,27 +297,6 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
         body: expect.objectContaining({
           model: "lookbase",
           view: "stacked_total_sale_price",
-        }),
-      }),
-    );
-
-    await executeEssbaseWriteback(mockSDK, "lookbase", "lookbase_writeback", {
-      action_type: "write_delta",
-      p_member_id: "DEPT:Men",
-      p_delta_value: "50000",
-    });
-    expect(mockSDK.run_inline_query).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        rebuild_pdts: true,
-        cache: false,
-        body: expect.objectContaining({
-          model: "lookbase",
-          view: "lookbase_writeback",
-          filters: expect.objectContaining({
-            "lookbase_writeback.action_type": "write_delta",
-            "lookbase_writeback.p_member_id": "DEPT:Men",
-            "lookbase_writeback.p_delta_value": "50000",
-          }),
         }),
       }),
     );
@@ -1335,6 +1317,153 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       }),
     );
     expect(renderedWithHost).toContain("LookBase");
+  });
+
+  test("supports 100% LookML vs 100% JSON hierarchy discovery configuration via hierarchy_discovery / hierarchy_source", async () => {
+    const jsonHierarchy = {
+      id: "json_only_tree",
+      label: "JSON Only Tree",
+      shortLabel: "JSON Tree",
+      rootLabel: "JSON Root",
+      description: "Defined in JSON",
+      levelLabels: ["Root", "L1"],
+      defaultExpandedIds: ["ROOT", "ALL", "JSON:L1"],
+      defaultExpandedPaths: ["JSON Root", "JSON Root|JSON L1"],
+      sourceType: "cube" as const,
+      exploreView: "dim_product_hierarchy",
+      preloadedByDefault: true,
+    };
+
+    const outlineRowsFromLookml = [
+      {
+        "dim_product_hierarchy.hierarchy_id": "total_ihg",
+        "dim_product_hierarchy.member_id": "ALL",
+        "dim_product_hierarchy.parent_id": "ROOT",
+        "dim_product_hierarchy.member_label": "Total IHG",
+        "dim_product_hierarchy.level_num": 0,
+      },
+      {
+        "dim_product_hierarchy.hierarchy_id": "total_ihg",
+        "dim_product_hierarchy.member_id": "DEPT:AMER Operations",
+        "dim_product_hierarchy.parent_id": "ALL",
+        "dim_product_hierarchy.member_label": "AMER Operations",
+        "dim_product_hierarchy.level_num": 1,
+      },
+      {
+        "dim_product_hierarchy.hierarchy_id": "country",
+        "dim_product_hierarchy.member_id": "ALL",
+        "dim_product_hierarchy.parent_id": "ROOT",
+        "dim_product_hierarchy.member_label": "All Countries",
+        "dim_product_hierarchy.level_num": 0,
+      },
+      {
+        "dim_product_hierarchy.hierarchy_id": "country",
+        "dim_product_hierarchy.member_id": "DEPT:United States",
+        "dim_product_hierarchy.parent_id": "ALL",
+        "dim_product_hierarchy.member_label": "United States",
+        "dim_product_hierarchy.level_num": 1,
+      },
+    ];
+
+    // 1. "json" mode pulls 100% from JSON and ignores LookML outline rows / explore dimensions
+    const jsonCfg = {
+      ...DEFAULT_CALCULATIONS_CONFIG,
+      model: "hotel_finance",
+      hierarchy_discovery: { source: "json" as const },
+      hierarchies: [jsonHierarchy],
+    };
+    expect(resolveHierarchyDiscoverySource(jsonCfg)).toBe("json");
+    const fromJson = discoverHierarchiesFromExplore(
+      {
+        fields: {
+          dimensions: [
+            { name: "dim_geo.region", group_label: "Geography" },
+            { name: "dim_geo.country", group_label: "Geography" },
+          ],
+        },
+      },
+      jsonCfg,
+      outlineRowsFromLookml,
+    );
+    expect(fromJson.map((h) => h.id)).toEqual(["json_only_tree"]);
+
+    // 2. "lookml" mode pulls 100% from LookML and ignores JSON hierarchies
+    const lookmlCfg = {
+      ...DEFAULT_CALCULATIONS_CONFIG,
+      model: "hotel_finance",
+      hierarchy_discovery: { source: "lookml" as const },
+      hierarchies: [jsonHierarchy],
+    };
+    expect(resolveHierarchyDiscoverySource(lookmlCfg)).toBe("lookml");
+    const mockLookmlSdk = {
+      ok: async (p: any) => p,
+      run_inline_query: jest.fn().mockResolvedValue(outlineRowsFromLookml),
+    };
+    const fromLookml = await fetchHierarchiesFromLookmlOutline(
+      mockLookmlSdk,
+      "hotel_finance",
+      null,
+      lookmlCfg,
+    );
+    expect(fromLookml.map((h) => h.id)).toEqual(["total_ihg", "country"]);
+    expect(fromLookml.some((h) => h.id === "json_only_tree")).toBe(false);
+    expect(fromLookml[0].rootLabel).toBe("Total IHG");
+    expect(fromLookml[0].defaultExpandedIds).toEqual([
+      "ROOT",
+      "ALL",
+      "DEPT:AMER Operations",
+    ]);
+
+    // 3. Flat dot-key calculations.strings.json round-trips cleanly without lookbase_config_json stringification
+    const flatStrings = flattenConfigToStringsJson({
+      model: "hotel_finance",
+      explore: "long_metrics",
+      base_pdt_view: "long_metrics",
+      hierarchy_discovery: {
+        source: "lookml",
+        hierarchy_id_field: "dim_product_hierarchy.hierarchy_id",
+        outline_explore: "dim_product_hierarchy",
+      },
+      initial_state: {
+        year: "2026-09",
+        default_hierarchy: "total_ihg",
+        show_left_metrics_pane: true,
+        expanded_member_ids: ["ROOT", "ALL", "DEPT:AMER Operations"],
+      },
+      two_pass_metrics: [
+        {
+          id: "gm_pct",
+          label: "Net P&L Ratio % (CUSD)",
+          solve_order: 2,
+          formula:
+            "MEMBER('Constant USD Amount (Operator-Weighted P&L)') / NULLIF(MEMBER('Gross Constant USD Amount (Unweighted)'), 0)",
+          format: "0.0%",
+        },
+      ],
+    });
+    expect(Object.values(flatStrings).every((v) => typeof v === "string")).toBe(true);
+    expect(flatStrings["lookbase_config_json"]).toBeUndefined();
+    expect(flatStrings["hierarchy_discovery.source"]).toBe("lookml");
+    expect(flatStrings["two_pass_metrics.gm_pct.label"]).toBe("Net P&L Ratio % (CUSD)");
+
+    const unflattened = unflattenStringsJsonToConfig(flatStrings);
+    expect(unflattened.hierarchy_discovery.source).toBe("lookml");
+    expect(unflattened.initial_state.show_left_metrics_pane).toBe(true);
+    expect(unflattened.initial_state.expanded_member_ids).toEqual([
+      "ROOT",
+      "ALL",
+      "DEPT:AMER Operations",
+    ]);
+    expect(unflattened.two_pass_metrics).toEqual([
+      {
+        id: "gm_pct",
+        label: "Net P&L Ratio % (CUSD)",
+        solve_order: 2,
+        formula:
+          "MEMBER('Constant USD Amount (Operator-Weighted P&L)') / NULLIF(MEMBER('Gross Constant USD Amount (Unweighted)'), 0)",
+        format: "0.0%",
+      },
+    ]);
   });
 });
 

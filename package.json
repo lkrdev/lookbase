@@ -9,7 +9,7 @@
   },
   "scripts": {
     "test": "jest",
-    "build": "webpack && mkdir -p tmp/lookbase && cp dist/bundle.js tmp/lookbase/bundle.js && node -e \"const fs=require('fs'),c=JSON.parse(fs.readFileSync('lookbase.config.json','utf8'));fs.writeFileSync('tmp/lookbase/calculations.strings.json',JSON.stringify({model:c.model,explore:c.explore,writeback_explore:c.writeback_explore,base_pdt_view:c.base_pdt_view,lookbase_config_json:JSON.stringify(c)},null,2)+'\\n');\"",
+    "build": "webpack && mkdir -p tmp/lookbase && cp dist/bundle.js tmp/lookbase/bundle.js && node -e \"const fs=require('fs'),c=JSON.parse(fs.readFileSync('lookbase.config.json','utf8')),out={},v=(o,p)=>{if(o==null)return;if(Array.isArray(o)){if(!o.length)return;if(o.every(x=>typeof x!=='object'||x===null)){out[p]=o.join(', ');return;}o.forEach((x,i)=>{if(x&&typeof x==='object'){const k=x.id||i;for(const[ a,b]of Object.entries(x)){if(a==='id'&&x.id)continue;v(b,p+'.'+k+'.'+a);}}});return;}if(typeof o==='object'){for(const[a,b]of Object.entries(o))v(b,p?p+'.'+a:a);return;}out[p]=String(o);};v(c,'');fs.writeFileSync('tmp/lookbase/calculations.strings.json',JSON.stringify(out,null,2)+'\\n');\"",
     "push": "npm run build && lkr-dev-cli --oauth-account=dev-googledemo2 tools lookml push tmp/lookbase --project-id=lookbase --deploy",
     "watch": "webpack --watch --progress",
     "develop": "webpack serve --server-type https --hot --port 8080 --mode development"

@@ -32,6 +32,7 @@ import {
   evaluateLeftHandMetricRow,
   fetchChildHierarchySlice,
   fetchFullHierarchyCatalog,
+  fetchHierarchiesFromLookmlOutline,
   fetchHierarchyModalChildren,
   formatLookBaseValue,
   formatMonthYearLabel,
@@ -51,6 +52,7 @@ import {
   LOOKBASE_TIMEFRAME_OPTIONS,
   LookBaseCurrentUser,
   LookBaseHierarchyDef,
+  LookBaseMeasureDef,
   LookBaseSettingsConfig,
   LookBaseUrlState,
   mergeOutlineRows,
@@ -63,6 +65,7 @@ import {
   projectOutlineRowsToReportTable,
   QuickStartActionConfig,
   rebuildCubePdt,
+  resolveHierarchyDiscoverySource,
   resolveInitialLeftHandMetrics,
   restoreSavedOutlineExpansion,
   searchAutocompleteItems,
@@ -86,22 +89,27 @@ import {
 } from "./lookbaseTour";
 import driverStyles from "driver.js/dist/driver.css";
 import styles from "./essbaseTheme.css";
+import { LookBaseHeaderBars } from "./LookBaseHeaderBars";
+import { LookBaseHierarchyModal } from "./LookBaseHierarchyModal";
+import { LookBaseLeftMetricsPane } from "./LookBaseLeftMetricsPane";
+import { LookBaseSettingsModal } from "./LookBaseSettingsModal";
+import {
+  LookBaseToast,
+  LookBaseToastStack,
+  ToastVariant,
+  useLookBaseToasts,
+} from "./lookbaseToasts";
+
+export type { LookBaseToast, ToastVariant };
 
 const SAVED_EXPANSION_STORAGE_KEY = "lookbase_saved_expanded_member_ids";
 const SAVED_PATHS_STORAGE_KEY = "lookbase_saved_expanded_paths";
-
-export type ToastVariant = "info" | "success" | "error";
-
-export interface LookBaseToast {
-  id: string;
-  message: string;
-  variant: ToastVariant;
-  timeoutMs?: number | null;
-}
+const MAX_PERSISTED_EXPANDED_MEMBER_IDS = 60;
 
 const LOOKBASE_DEFAULT_VIS_CONFIG: VisConfig = {
   theme: "custom",
   customTheme: "",
+  exposeDownloadLink: true,
   rowSubtotals: true,
   subtotalStyle: "collapsed",
   subtotalsOnTop: true,
@@ -113,8 +121,8 @@ const LOOKBASE_DEFAULT_VIS_CONFIG: VisConfig = {
   freezeTableHeaders: true,
   freezeColumns: 1,
   minWidthForIndexColumns: true,
-  allowUserEdits: true,
-  allowUserFilters: true,
+  allowUserEdits: false,
+  allowUserFilters: false,
 };
 
 const defaultInit = DEFAULT_CALCULATIONS_CONFIG.initial_state || {};
@@ -143,6 +151,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   );
   const [standaloneQueryResponse, setStandaloneQueryResponse] = useState<QueryResponse | undefined>(
     () => (host ? (STARTER_OUTLINE_QUERY_RESPONSE as QueryResponse) : undefined),
+  );
+  const [initialQueryResolved, setInitialQueryResolved] = useState<boolean>(() =>
+    Boolean(host && typeof (host as any).invokeCoreSdk !== "function"),
   );
   const [savedExpandedMemberIds, setSavedExpandedMemberIds] = useState<string[]>(
     initialUrlState.expanded?.length
@@ -362,112 +373,16 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [currentUser],
   );
 
-  // Formula bar & writeback cell state
+  // Formula bar state
   const [activeCellCoord, setActiveCellCoord] = useState<string>("A1");
   const [formulaText, setFormulaText] = useState<string>(
     '=GETVALUE("Total Sale Price", "Current", "ytd", "ALL")',
-  );
-  const [selectedCellMeta, setSelectedCellMeta] = useState<{
-    memberId: string;
-    path: string;
-    metric: string;
-    period: string;
-    currentValue: number;
-  } | null>(
-    initialUrlState.edit
-      ? {
-          memberId: initialUrlState.member || "DEPT:Women",
-          path: "All Products|Women",
-          metric: "Total Sale Price",
-          period: "Current",
-          currentValue: 942100,
-        }
-      : null,
   );
   const [editValueInput, setEditValueInput] = useState<string>(initialUrlState.edit || "");
   const [isBusy, setIsBusy] = useState<boolean>(false);
 
   // Stacked Bottom-Right Stateful Toasts (lookbase-toasts skill)
-  const [toasts, setToasts] = useState<LookBaseToast[]>([]);
-  const toastTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-
-  const dismissToast = useCallback((id: string) => {
-    if (toastTimersRef.current[id]) {
-      clearTimeout(toastTimersRef.current[id]);
-      delete toastTimersRef.current[id];
-    }
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
-  const scheduleToastTimer = useCallback(
-    (id: string, timeoutMs?: number | null) => {
-      if (toastTimersRef.current[id]) {
-        clearTimeout(toastTimersRef.current[id]);
-        delete toastTimersRef.current[id];
-      }
-      if (typeof timeoutMs === "number" && timeoutMs > 0) {
-        toastTimersRef.current[id] = setTimeout(() => {
-          dismissToast(id);
-        }, timeoutMs);
-      }
-    },
-    [dismissToast],
-  );
-
-  const pushToast = useCallback(
-    (opts: { message: string; variant?: ToastVariant; timeoutMs?: number | null }): string => {
-      const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const variant: ToastVariant = opts.variant || "info";
-      const timeoutMs =
-        opts.timeoutMs !== undefined
-          ? opts.timeoutMs
-          : variant === "info"
-            ? null
-            : variant === "error"
-              ? 6000
-              : 4000;
-      setToasts((prev) => [...prev, { id, message: opts.message, variant, timeoutMs }]);
-      scheduleToastTimer(id, timeoutMs);
-      return id;
-    },
-    [scheduleToastTimer],
-  );
-
-  const updateToast = useCallback(
-    (
-      id: string,
-      patch: { message?: string; variant?: ToastVariant; timeoutMs?: number | null },
-    ) => {
-      setToasts((prev) =>
-        prev.map((t) => {
-          if (t.id !== id) return t;
-          const nextVariant = patch.variant || t.variant;
-          const nextTimeout =
-            patch.timeoutMs !== undefined
-              ? patch.timeoutMs
-              : nextVariant === "info"
-                ? null
-                : nextVariant === "error"
-                  ? 6000
-                  : 4000;
-          scheduleToastTimer(id, nextTimeout);
-          return {
-            ...t,
-            ...(patch.message !== undefined ? { message: patch.message } : {}),
-            variant: nextVariant,
-            timeoutMs: nextTimeout,
-          };
-        }),
-      );
-    },
-    [scheduleToastTimer],
-  );
-
-  useEffect(() => {
-    return () => {
-      Object.values(toastTimersRef.current).forEach(clearTimeout);
-    };
-  }, []);
+  const { toasts, pushToast, updateToast, dismissToast } = useLookBaseToasts();
 
   const gridWrapperRef = useRef<HTMLDivElement>(null);
   const autocompleteInputRef = useRef<HTMLInputElement>(null);
@@ -563,7 +478,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       );
       return fromInit?.length
         ? Array.from(new Set([...fromInit, defH]))
-        : effectiveAvailableHierarchies.slice(0, 2).map((h) => h.id);
+        : resolveHierarchyDiscoverySource(calcConfig) === "lookml"
+          ? effectiveAvailableHierarchies.map((h) => h.id)
+          : effectiveAvailableHierarchies.slice(0, 2).map((h) => h.id);
     }
     return enabledHierarchyIds;
   }, [enabledHierarchyIds, effectiveAvailableHierarchies, calcConfig]);
@@ -833,7 +750,6 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       year: povYear,
       hierarchy: activeHierarchyId !== defaultHierarchyId ? activeHierarchyId : undefined,
       member: selectedOutlineMemberId,
-      expanded: savedExpandedMemberIds,
       metrics: leftMetricRows.map((r) => r.id),
       pane: showLeftMetricsPane,
       modal: isHierarchyModalOpen ? "hierarchy" : null,
@@ -875,6 +791,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   const persistSavedExpansion = useCallback(
     (memberIds: string[], paths: string[]) => {
       setSavedExpandedMemberIds(memberIds);
+      if (memberIds.length > MAX_PERSISTED_EXPANDED_MEMBER_IDS) {
+        return;
+      }
       saveUserPrefsArtifact(
         core40SDK,
         {
@@ -1066,6 +985,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         variant: "info",
         timeoutMs: null,
       });
+      const applyStarterFallback = () => {
+        const fallbackOutline = getStarterOutlineForConfig(activeCfg, resolvedHierarchyId);
+        setOutlineRows((prev) => (prev.length === 0 ? fallbackOutline.data : prev));
+        setStandaloneQueryResponse((prev: QueryResponse | undefined) =>
+          !prev ? (fallbackOutline as QueryResponse) : prev,
+        );
+      };
+
       try {
         const baseFilters: Record<string, string> = {
           "long_metrics.timeframe": aligned.timeframe,
@@ -1211,6 +1138,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
             data: allMergedRows,
           } as QueryResponse);
           fetchedMemberIdsRef.current = new Set(parentSet);
+        } else {
+          applyStarterFallback();
         }
         updateToast(toastId, {
           message: `Cube synced (${allMergedRows.length} rows · ${resolvedHierarchyId} · ${aligned.timeframe}).`,
@@ -1218,12 +1147,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           timeoutMs: 3500,
         });
       } catch {
+        applyStarterFallback();
         updateToast(toastId, {
           message: "Interactive Cube Ready (using cached outline snapshot).",
           variant: "success",
           timeoutMs: 3500,
         });
       } finally {
+        setInitialQueryResolved(true);
         setIsBusy(false);
       }
     },
@@ -1342,52 +1273,17 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         setIsHierarchyModalOpen(urlPatch.modal === "hierarchy");
         setIsSettingsModalOpen(urlPatch.modal === "settings");
       }
-      const primaryMeasureField =
-        calcConfig.measures?.[0]?.fieldName ||
-        calcConfig.measures?.[0]?.id ||
-        "long_metrics.total_sale_price";
       const primaryMeasureLabel =
         calcConfig.measures?.[0]?.label || "Total Sale Price";
-      const defaultFirstBranchId =
-        activeHierarchyDef?.defaultExpandedIds?.find((id) => id !== "ROOT" && id !== "ALL") ||
-        "DEPT:Women";
-      const defaultFirstBranchPath =
-        activeHierarchyDef?.defaultExpandedPaths?.find((p) => p.includes("|")) ||
-        `${activeHierarchyDef?.rootLabel || "All Products"}|Women`;
 
       if (urlPatch.member !== undefined) {
         setSelectedOutlineMemberId(urlPatch.member);
-        const node = projectedOutline?.memberIdToNode?.[urlPatch.member];
-        const salesVal =
-          node?.rawRow?.[primaryMeasureField]?.Current?.value ?? 942100;
         setFormulaText(
           `=GETVALUE("${primaryMeasureLabel}", "Current", "${nextTimeframe}", "${pcConfig.memberIdField}=${urlPatch.member}")`,
         );
-        if (urlPatch.edit !== undefined || nextVersion === "sandbox") {
-          setSelectedCellMeta({
-            memberId: urlPatch.member,
-            path: node?.path || defaultFirstBranchPath,
-            metric: primaryMeasureLabel,
-            period: "Current",
-            currentValue: salesVal,
-          });
-        }
       }
       if (urlPatch.edit !== undefined) {
         setEditValueInput(urlPatch.edit);
-        if (!selectedCellMeta) {
-          const targetMember =
-            urlPatch.member || selectedOutlineMemberId || defaultFirstBranchId;
-          const node = projectedOutline?.memberIdToNode?.[targetMember];
-          setSelectedCellMeta({
-            memberId: targetMember,
-            path: node?.path || defaultFirstBranchPath,
-            metric: primaryMeasureLabel,
-            period: "Current",
-            currentValue:
-              node?.rawRow?.[primaryMeasureField]?.Current?.value ?? 942100,
-          });
-        }
       }
       if (urlPatch.expanded && urlPatch.expanded.length > 0) {
         const nextIds = Array.from(new Set(["ROOT", "ALL", ...urlPatch.expanded]));
@@ -1443,8 +1339,6 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       handleSwitchHierarchy,
       projectedOutline,
       pcConfig.memberIdField,
-      selectedCellMeta,
-      selectedOutlineMemberId,
       expandedPaths,
       persistSavedExpansion,
       calcConfig,
@@ -1478,9 +1372,12 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       ]);
       if (cancelled) return;
 
+      const hierarchySource = resolveHierarchyDiscoverySource(rawCfg);
       const exploreMeta =
         (!isCustomCalculationsConfig(rawCfg) ||
-          (!rawCfg.hierarchies?.length && !rawCfg.measures?.length)) &&
+          hierarchySource === "lookml" ||
+          !rawCfg.measures?.length ||
+          !rawCfg.hierarchies?.length) &&
         core40SDK &&
         typeof core40SDK.lookml_model_explore === "function"
           ? await withSdkTimeout(
@@ -1495,20 +1392,32 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                   ),
                 )
                 .catch(() => null),
-              1500,
+              4000,
               null,
             )
           : null;
       if (cancelled) return;
 
-      const loadedCfg = exploreMeta
+      let loadedCfg = exploreMeta
         ? discoverFieldsFromExplore(exploreMeta, rawCfg)
         : rawCfg;
+      const discoveredHierarchies = await fetchHierarchiesFromLookmlOutline(
+        core40SDK,
+        activeProjectId,
+        exploreMeta,
+        loadedCfg,
+      );
+      if (cancelled) return;
+      if (resolveHierarchyDiscoverySource(loadedCfg) === "lookml") {
+        loadedCfg = {
+          ...loadedCfg,
+          hierarchies: discoveredHierarchies,
+        };
+      }
       calcConfigRef.current = loadedCfg;
       effectiveModelRef.current = resolveEffectiveModel(loadedCfg);
       setCalcConfig(loadedCfg);
       const isCustomConfig = isCustomCalculationsConfig(loadedCfg);
-      const discoveredHierarchies = discoverHierarchiesFromExplore(exploreMeta, loadedCfg);
       setAvailableHierarchies(discoveredHierarchies);
 
       if (userArtifact.user) {
@@ -1568,7 +1477,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       const startEnabledHierarchies =
         initCfg.enabled_hierarchies?.length
           ? Array.from(new Set([...initCfg.enabled_hierarchies, startHierarchy]))
-          : discoveredHierarchies.slice(0, 2).map((h) => h.id);
+          : resolveHierarchyDiscoverySource(loadedCfg) === "lookml"
+            ? discoveredHierarchies.map((h) => h.id)
+            : discoveredHierarchies.slice(0, 2).map((h) => h.id);
       if (initCfg.available_years?.length) {
         setAvailableYears(initCfg.available_years);
       }
@@ -1644,6 +1555,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         !useUrlExpansion &&
         startHierarchy === defaultHierarchyId &&
         sanitizedPrefMemberIds.length > (isCustomConfig ? 2 : 0) &&
+        sanitizedPrefMemberIds.length <= MAX_PERSISTED_EXPANDED_MEMBER_IDS &&
         sanitizedPrefPaths.length > (isCustomConfig ? 1 : 0);
 
       const startMemberIds = useUrlExpansion
@@ -1659,12 +1571,20 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           : usePrefExpansion
             ? sanitizedPrefPaths
             : initCfg.expanded_paths || startHierarchyDef.defaultExpandedPaths;
+      if (sanitizedPrefMemberIds.length > MAX_PERSISTED_EXPANDED_MEMBER_IDS) {
+        saveUserPrefsArtifact(
+          core40SDK,
+          { savedExpandedMemberIds: startMemberIds, savedExpandedPaths: startPaths },
+          artifactNamespace,
+        );
+      }
       setSavedExpandedMemberIds(startMemberIds);
       setExpandedPaths(startPaths);
       setHierarchyCatalogNodes(getStarterHierarchyNodesForId(startHierarchy, loadedCfg));
 
-      // Seed starter outline rows for the resolved config so custom projects never show e-commerce starter rows
-      if (!hostQueryResponse) {
+      // Only seed starter outline rows immediately when running offline without core40SDK;
+      // when core40SDK is connected, wait for loadStandaloneOutline so we show the skeleton instead of fake $0 rows
+      if (!hostQueryResponse && !core40SDK) {
         const starterOutline = getStarterOutlineForConfig(loadedCfg, startHierarchy);
         setOutlineRows((prev) =>
           prev.length === 0 || isCustomConfig ? starterOutline.data : prev,
@@ -1672,6 +1592,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         setStandaloneQueryResponse((prev) =>
           !prev || isCustomConfig ? (starterOutline as QueryResponse) : prev,
         );
+        setInitialQueryResolved(true);
       }
 
       // Apply starting Left-Hand Metrics (URL -> User Artifact -> Project Config),
@@ -1977,6 +1898,11 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       ...effectiveVisConfig,
       theme: "custom",
       customTheme: "",
+      exposeDownloadLink: true,
+      excludeHiddenRowsOnDownload: true,
+      allowUserEdits: false,
+      allowUserFilters: false,
+      hasUserEdits: false,
       expandSubtotals: expandedPaths.join(","),
       isExtension: true,
     }),
@@ -2226,19 +2152,11 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         setFormulaText(
           `[Member] id="${memberId}" parent="${node?.parentId || "ROOT"}" path="${rowPath}"${pctTag}`,
         );
-        setSelectedCellMeta(null);
       } else {
         setFormulaText(
           `=GETVALUE("${primaryMeasureLabel}", "Current", "${povTimeframe}", "${pcConfig.memberIdField}=${memberId}")`,
         );
         if (Number.isFinite(numericVal)) {
-          setSelectedCellMeta({
-            memberId,
-            path: rowPath,
-            metric: primaryMeasureLabel,
-            period: "Current",
-            currentValue: numericVal,
-          });
           setEditValueInput(String(numericVal));
         }
       }
@@ -2506,8 +2424,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   ]);
 
   useEffect(() => {
-    activeHost?.updateTitle?.("");
-  }, [activeHost]);
+    const matchedH =
+      effectiveAvailableHierarchies.find((h) => h.id === effectiveActiveHierarchyId) ||
+      effectiveAvailableHierarchies[0];
+    const friendlyLabel =
+      matchedH?.shortLabel || matchedH?.label || matchedH?.rootLabel || "";
+    const pageTitle = friendlyLabel ? `${friendlyLabel} - LookBase` : "LookBase";
+    activeHost?.updateTitle?.(pageTitle);
+  }, [activeHost, effectiveAvailableHierarchies, effectiveActiveHierarchyId]);
 
   const activeOutlineNode: OutlineNodeMeta | undefined =
     projectedOutline?.memberIdToNode?.[selectedOutlineMemberId] ||
@@ -2612,864 +2536,94 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
 
   return (
     <div className="lookbase-shell">
-      {/* Top Ribbon */}
-      <div className="lookbase-ribbon">
-        <div className="lookbase-ribbon-left">
-          <span id="lookbase-tour-brand" className="lookbase-brand">
-            LookBase
-          </span>
-          <button
-            className="lookbase-btn tour-btn"
-            onClick={() => {
-              setShowLeftMetricsPane(true);
-              startLookBaseTour({
-                core40SDK,
-                namespace: artifactNamespace,
-              });
-            }}
-            title="Start 8-step interactive Driver.js spotlight tour"
-          >
-            ? Guided Tour
-          </button>
-          <button
-            className={`lookbase-btn ${showLeftMetricsPane ? "active-toggle" : ""}`}
-            onClick={() => setShowLeftMetricsPane((v) => !v)}
-            title="Toggle Left-Hand Side Metrics & Calculation Autocomplete Dock"
-          >
-            Metrics on Left (Autocomplete)
-          </button>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-            <button
-              id="lookbase-tour-hierarchy-btn"
-              className="lookbase-btn"
-              onClick={() => setIsHierarchyModalOpen(true)}
-              title="Open Hierarchy Selector & Multi-Level Subtree Filter"
-            >
-              Hierarchy Selector: {activeHierarchyDef.shortLabel} ({savedExpandedMemberIds.length} Saved)
-            </button>
-            <select
-              aria-label="Quick Switch Active Hierarchy"
-              style={{
-                height: 22,
-                fontSize: 11,
-                border: "1px solid #93c5fd",
-                borderRadius: 3,
-                background: "#eff6ff",
-                color: "#1e3a8a",
-                fontWeight: 600,
-                padding: "0 4px",
-                cursor: "pointer",
-              }}
-              value={effectiveActiveHierarchyId}
-              onChange={(e) => handleSwitchHierarchy(e.target.value)}
-              title="Quick-swap active dimensional hierarchy"
-            >
-              {effectiveAvailableHierarchies
-                .filter((h) => effectiveEnabledHierarchyIds.includes(h.id))
-                .map((h) => (
-                  <option key={h.id} value={h.id}>
-                    {h.shortLabel}
-                  </option>
-                ))}
-            </select>
-          </span>
-          <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
-            <button
-              type="button"
-              data-testid="grid-measures-multiselect-btn"
-              className={`lookbase-btn ${isMeasuresDropdownOpen ? "active-toggle" : ""}`}
-              onClick={() => setIsMeasuresDropdownOpen((v) => !v)}
-              title="Select / Deselect LookML Measures shown as columns in the main outline grid"
-            >
-              Measures ({effectiveSelectedGridMeasureIds.length} Selected) ▾
-            </button>
-            {isMeasuresDropdownOpen && (
-              <div
-                data-testid="grid-measures-dropdown"
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  left: 0,
-                  width: 340,
-                  background: "#ffffff",
-                  border: "1px solid #94a3b8",
-                  borderRadius: 4,
-                  boxShadow: "0 8px 20px rgba(15, 23, 42, 0.18)",
-                  zIndex: 360,
-                  padding: 8,
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    borderBottom: "1px solid #e2e8f0",
-                    paddingBottom: 6,
-                    marginBottom: 6,
-                  }}
-                >
-                  <strong style={{ fontSize: 11, color: "#0f172a" }}>
-                    Grid Columns ({effectiveSelectedGridMeasureIds.length} of{" "}
-                    {availableGridMeasures.length})
-                  </strong>
-                  <div style={{ display: "inline-flex", gap: 4 }}>
-                    <button
-                      type="button"
-                      className="lookbase-btn"
-                      style={{ height: 18, fontSize: 10, padding: "0 5px" }}
-                      onClick={() => {
-                        const defaultList = calcConfig.initial_state?.grid_measures?.length
-                          ? calcConfig.initial_state.grid_measures
-                          : availableGridMeasures
-                              .slice(0, 4)
-                              .map((m) => m.fieldName || m.id);
-                        if (defaultList.length === 0) return;
-                        selectedGridMeasureIdsRef.current = defaultList;
-                        setSelectedGridMeasureIds(defaultList);
-                        saveUserPrefsArtifact(
-                          core40SDK,
-                          { gridMeasureIds: defaultList },
-                          artifactNamespace,
-                        );
-                        loadStandaloneOutline(
-                          povVersion,
-                          povTimeframe,
-                          povSource,
-                          povYear,
-                          savedExpandedMemberIds,
-                          effectiveActiveHierarchyId,
-                          calcConfig,
-                          defaultList,
-                        );
-                      }}
-                    >
-                      Reset Default
-                    </button>
-                    <button
-                      type="button"
-                      className="lookbase-btn primary"
-                      style={{ height: 18, fontSize: 10, padding: "0 6px" }}
-                      onClick={() => setIsMeasuresDropdownOpen(false)}
-                    >
-                      Done
-                    </button>
-                  </div>
-                </div>
-                <div
-                  style={{
-                    maxHeight: 280,
-                    overflowY: "auto",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 3,
-                  }}
-                >
-                  {availableGridMeasures.map((m) => {
-                    const mKey = m.fieldName || m.id;
-                    const isChecked = effectiveSelectedGridMeasureIds.includes(mKey);
-                    return (
-                      <label
-                        key={mKey}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: "4px 6px",
-                          borderRadius: 3,
-                          background: isChecked ? "#eff6ff" : "transparent",
-                          cursor: "pointer",
-                          fontSize: 11,
-                        }}
-                      >
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                          <input
-                            type="checkbox"
-                            data-testid={`grid-measure-opt-${mKey}`}
-                            checked={isChecked}
-                            onChange={() => {
-                              let nextList: string[];
-                              if (isChecked) {
-                                if (effectiveSelectedGridMeasureIds.length <= 1) return; // keep at least 1 measure
-                                nextList = effectiveSelectedGridMeasureIds.filter(
-                                  (id) => id !== mKey,
-                                );
-                              } else {
-                                nextList = [...effectiveSelectedGridMeasureIds, mKey];
-                              }
-                              selectedGridMeasureIdsRef.current = nextList;
-                              setSelectedGridMeasureIds(nextList);
-                              saveUserPrefsArtifact(
-                                core40SDK,
-                                { gridMeasureIds: nextList },
-                                artifactNamespace,
-                              );
-                              loadStandaloneOutline(
-                                povVersion,
-                                povTimeframe,
-                                povSource,
-                                povYear,
-                                savedExpandedMemberIds,
-                                effectiveActiveHierarchyId,
-                                calcConfig,
-                                nextList,
-                              );
-                            }}
-                          />
-                          <span style={{ fontWeight: isChecked ? 700 : 500, color: "#0f172a" }}>
-                            {m.label || m.label_short || mKey}
-                          </span>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </span>
-          <span id="lookbase-tour-actions" style={{ display: "inline-flex", gap: 6 }}>
-            {canRebuildCube && (
-              <>
-                <button
-                  className="lookbase-btn"
-                  disabled={isBusy}
-                  onClick={() => handleRebuildCube()}
-                  title="Rebuild combined long_metrics_base PDT via run_inline_query(rebuild_pdts=true)"
-                >
-                  Calc All (Rebuild Cube)
-                </button>
-                {!isCustomCalculationsConfig(calcConfig) && (
-                  <button
-                    className="lookbase-btn"
-                    disabled={isBusy}
-                    onClick={() => handleRebuildCube("stacked_total_sale_price")}
-                    title="Rebuild only the modular stacked_total_sale_price PDT"
-                  >
-                    Calc Sales PDT
-                  </button>
-                )}
-              </>
-            )}
-            {canUpdateSettings && (
-              <button
-                id="lookbase-settings-btn"
-                className="lookbase-btn"
-                onClick={handleOpenSettings}
-                title="Open LookBase Configuration Settings (Settings & Rebuild Cube Access Control + BI Engine Table List)"
-              >
-                ⚙ Settings
-              </button>
-            )}
-          </span>
-        </div>
-
-        {/* Inline Top-Right POV Bar (Row 1 Slice Cells) */}
-        <div id="lookbase-tour-pov" className="lookbase-ribbon-right">
-          <span className="lookbase-pov-label">POV:</span>
-          <div
-            className="lookbase-pov-cell"
-            style={{ position: "relative" }}
-            title="Multi-Select Stacked Timeframe Slice (Select 1 or more timeframes, e.g., R3M + R12M)"
-          >
-            <span>Timeframe:</span>
-            <button
-              type="button"
-              data-testid="pov-timeframe-multiselect-btn"
-              onClick={() => setIsTimeframeDropdownOpen((v) => !v)}
-              style={{
-                border: "none",
-                background: "transparent",
-                fontWeight: 600,
-                color: "#0f172a",
-                fontSize: 11,
-                cursor: "pointer",
-                padding: "0 2px",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-              }}
-            >
-              <span>
-                {selectedTimeframes.length === 1
-                  ? formatTimeframeLabel(selectedTimeframes[0])
-                  : selectedTimeframes.map((tf) => formatTimeframeShortLabel(tf)).join(" + ")}
-              </span>
-              <span style={{ fontSize: 9, color: "#475569" }}>▾</span>
-            </button>
-            {isTimeframeDropdownOpen && (
-              <div
-                data-testid="pov-timeframe-dropdown"
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  right: 0,
-                  width: 250,
-                  background: "#ffffff",
-                  border: "1px solid #94a3b8",
-                  borderRadius: 4,
-                  boxShadow: "0 8px 20px rgba(15, 23, 42, 0.18)",
-                  zIndex: 350,
-                  padding: 8,
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    borderBottom: "1px solid #e2e8f0",
-                    paddingBottom: 6,
-                    marginBottom: 6,
-                  }}
-                >
-                  <strong style={{ fontSize: 11, color: "#0f172a" }}>
-                    Select Timeframes ({selectedTimeframes.length})
-                  </strong>
-                  <div style={{ display: "inline-flex", gap: 4 }}>
-                    <button
-                      type="button"
-                      className="lookbase-btn"
-                      style={{ height: 18, fontSize: 10, padding: "0 5px" }}
-                      onClick={() => setIsTimeframeDropdownOpen(false)}
-                    >
-                      Done
-                    </button>
-                  </div>
-                </div>
-                <div
-                  style={{
-                    maxHeight: 240,
-                    overflowY: "auto",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 3,
-                  }}
-                >
-                  {LOOKBASE_TIMEFRAME_OPTIONS.map((opt) => {
-                    const isChecked = selectedTimeframes.includes(opt.value);
-                    return (
-                      <label
-                        key={opt.value}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: "3px 6px",
-                          borderRadius: 3,
-                          background: isChecked ? "#eff6ff" : "transparent",
-                          cursor: "pointer",
-                          fontSize: 11,
-                        }}
-                      >
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                          <input
-                            type="checkbox"
-                            data-testid={`timeframe-opt-${opt.value}`}
-                            checked={isChecked}
-                            onChange={() => {
-                              let nextList: string[];
-                              if (isChecked) {
-                                if (selectedTimeframes.length <= 1) return; // keep at least 1 timeframe
-                                nextList = selectedTimeframes.filter((t) => t !== opt.value);
-                              } else {
-                                nextList = [...selectedTimeframes, opt.value];
-                              }
-                              handlePovChange(
-                                povVersion,
-                                nextList.join(","),
-                                povSource,
-                                povYear,
-                                "timeframe",
-                              );
-                            }}
-                          />
-                          <span style={{ fontWeight: isChecked ? 700 : 500, color: "#0f172a" }}>
-                            {opt.label}
-                          </span>
-                        </span>
-                        <span style={{ fontSize: 9, color: "#64748b" }}>
-                          {opt.grain.replace(" Actual", "")}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-          <div className="lookbase-pov-cell" title="Aggregation Grain">
-            <span>Grain:</span>
-            <select
-              value={povSource}
-              onChange={(e) =>
-                handlePovChange(povVersion, povTimeframe, e.target.value, povYear, "source")
-              }
-            >
-              <option value="Daily Actual">Daily Actual</option>
-              <option value="Monthly Actual">Monthly Actual</option>
-              <option value="Quarterly Actual">Quarterly Actual</option>
-            </select>
-          </div>
-          <div className="lookbase-pov-cell" title="Month + Year Slice">
-            <span>Month:</span>
-            <select
-              aria-label="Month"
-              value={povYear}
-              onChange={(e) => handlePovChange(povVersion, povTimeframe, povSource, e.target.value)}
-            >
-              {availableYears.map((ym) => (
-                <option key={ym} value={ym}>
-                  {formatMonthYearLabel(ym)}
-                </option>
-              ))}
-              <option value="ALL">All Months</option>
-            </select>
-          </div>
-          <button
-            id="lookbase-pov-run-btn"
-            className="lookbase-btn primary"
-            disabled={isBusy}
-            onClick={() => {
-              setIsTimeframeDropdownOpen(false);
-              loadStandaloneOutline(
-                povVersion,
-                povTimeframe,
-                povSource,
-                povYear,
-                savedExpandedMemberIds,
-                activeHierarchyId,
-              );
-            }}
-            title="Run / Refresh live BigQuery cube query for the selected POV slice"
-          >
-            {isBusy ? "Running..." : "↻ Run"}
-          </button>
-        </div>
-      </div>
-
-      {/* Configurable & Individually Dismissible Quick-Start Guide Strip */}
-      {showQuickStartBar && (
-        <div className="lookbase-quickstart-bar">
-          <div className="lookbase-quickstart-steps">
-            <strong style={{ color: "#1e3a8a" }}>Quick-Start Actions:</strong>
-            {visibleQuickStartActions.map((action) => (
-              <span key={action.id} className="lookbase-step-pill-wrap">
-                <button
-                  className="lookbase-step-pill"
-                  onClick={() => applyUrlState(action.params)}
-                  title={`Apply preset: ?${serializeLookBaseUrlState(action.params)}`}
-                >
-                  {action.label}
-                </button>
-                <button
-                  className="lookbase-step-pill-dismiss"
-                  onClick={() => handleDismissQuickStartPill(action.id)}
-                  title="Dismiss this Quick-Start pill"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-
-            {isAddingCustomQuickStart ? (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                <input
-                  style={{
-                    height: 20,
-                    fontSize: 11,
-                    padding: "0 6px",
-                    border: "1px solid #2563eb",
-                    borderRadius: 3,
-                  }}
-                  value={newQuickStartLabel}
-                  onChange={(e) => setNewQuickStartLabel(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleSaveCustomQuickStart();
-                    else if (e.key === "Escape") setIsAddingCustomQuickStart(false);
-                  }}
-                  placeholder="Label for current view..."
-                  autoFocus
-                />
-                <button className="lookbase-btn primary" onClick={handleSaveCustomQuickStart}>
-                  Save
-                </button>
-                <button
-                  className="lookbase-btn"
-                  onClick={() => setIsAddingCustomQuickStart(false)}
-                >
-                  Cancel
-                </button>
-              </span>
-            ) : (
-              <button
-                className="lookbase-btn"
-                onClick={() => setIsAddingCustomQuickStart(true)}
-                title="Save current POV, expanded hierarchy branches, and left-hand metrics as a personal Quick-Start pill"
-              >
-                + Save Current View
-              </button>
-            )}
-
-            {dismissedQuickStartIds.length > 0 && (
-              <button
-                className="lookbase-btn"
-                onClick={() => applyUrlState({ quickstart: "reset" }, false)}
-                title="Restore individually dismissed default Quick-Start pills"
-              >
-                Restore Pills ({dismissedQuickStartIds.length})
-              </button>
-            )}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <button
-              className="lookbase-btn tour-btn"
-              onClick={() => {
-                setShowLeftMetricsPane(true);
-                startLookBaseTour({
-                  core40SDK,
-                  namespace: artifactNamespace,
-                });
-              }}
-            >
-              Launch Step-by-Step Tour
-            </button>
-            <button
-              className="lookbase-btn"
-              onClick={() => {
-                setShowQuickStartBar(false);
-                saveUserPrefsArtifact(
-                  core40SDK,
-                  { quickStartDismissed: true },
-                  artifactNamespace,
-                );
-              }}
-              title="Hide Quick-Start bar (re-open anytime with ?quickstart=1)"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Formula Bar */}
-      <div id="lookbase-tour-formula-bar" className="lookbase-formula-bar">
-        <div className="lookbase-cell-coord">{activeCellCoord}</div>
-        <div className="lookbase-fx-badge">fx</div>
-        <input
-          className="lookbase-formula-input"
-          value={formulaText}
-          onChange={(e) => setFormulaText(e.target.value)}
-          readOnly={false}
-        />
-      </div>
+      <LookBaseHeaderBars
+        core40SDK={core40SDK}
+        artifactNamespace={artifactNamespace}
+        calcConfig={calcConfig}
+        showLeftMetricsPane={showLeftMetricsPane}
+        setShowLeftMetricsPane={setShowLeftMetricsPane}
+        setIsHierarchyModalOpen={setIsHierarchyModalOpen}
+        activeHierarchyDef={activeHierarchyDef}
+        savedExpandedMemberIds={savedExpandedMemberIds}
+        effectiveActiveHierarchyId={effectiveActiveHierarchyId}
+        effectiveAvailableHierarchies={effectiveAvailableHierarchies}
+        effectiveEnabledHierarchyIds={effectiveEnabledHierarchyIds}
+        handleSwitchHierarchy={handleSwitchHierarchy}
+        isMeasuresDropdownOpen={isMeasuresDropdownOpen}
+        setIsMeasuresDropdownOpen={setIsMeasuresDropdownOpen}
+        effectiveSelectedGridMeasureIds={effectiveSelectedGridMeasureIds}
+        availableGridMeasures={availableGridMeasures}
+        selectedGridMeasureIdsRef={selectedGridMeasureIdsRef}
+        setSelectedGridMeasureIds={setSelectedGridMeasureIds}
+        loadStandaloneOutline={loadStandaloneOutline}
+        povVersion={povVersion}
+        povTimeframe={povTimeframe}
+        povSource={povSource}
+        povYear={povYear}
+        availableYears={availableYears}
+        selectedTimeframes={selectedTimeframes}
+        isTimeframeDropdownOpen={isTimeframeDropdownOpen}
+        setIsTimeframeDropdownOpen={setIsTimeframeDropdownOpen}
+        handlePovChange={handlePovChange}
+        canRebuildCube={canRebuildCube}
+        canUpdateSettings={canUpdateSettings}
+        isBusy={isBusy}
+        handleRebuildCube={handleRebuildCube}
+        handleOpenSettings={handleOpenSettings}
+        activeHierarchyId={activeHierarchyId}
+        showQuickStartBar={showQuickStartBar}
+        setShowQuickStartBar={setShowQuickStartBar}
+        visibleQuickStartActions={visibleQuickStartActions}
+        applyUrlState={applyUrlState}
+        handleDismissQuickStartPill={handleDismissQuickStartPill}
+        isAddingCustomQuickStart={isAddingCustomQuickStart}
+        setIsAddingCustomQuickStart={setIsAddingCustomQuickStart}
+        newQuickStartLabel={newQuickStartLabel}
+        setNewQuickStartLabel={setNewQuickStartLabel}
+        handleSaveCustomQuickStart={handleSaveCustomQuickStart}
+        dismissedQuickStartIds={dismissedQuickStartIds}
+        activeCellCoord={activeCellCoord}
+        formulaText={formulaText}
+        setFormulaText={setFormulaText}
+      />
 
       {/* Main Split Workspace: Left-Hand Side Metrics/Calculation Autocomplete + Right Outline Grid */}
       <div className="lookbase-workspace">
-        {showLeftMetricsPane && (
-          <div className="lookbase-left-metrics-pane">
-            <div className="lookbase-left-pane-header">
-              <span>
-                Metrics & Calculations ({activeOutlineNode?.label || activeHierarchyDef.rootLabel || "All Products"})
-              </span>
-              <span style={{ fontSize: 10, color: "#1e3a8a" }}>
-                L{activeOutlineNode?.level ?? 0} · {selectedOutlineMemberId}
-              </span>
-            </div>
-
-            {/* Inline Autocomplete Combobox for Measures, 2-Pass Calcs, Variances & Custom Formulas */}
-            <div id="lookbase-tour-autocomplete" className="lookbase-autocomplete-wrap">
-              <input
-                ref={autocompleteInputRef}
-                className="lookbase-autocomplete-input"
-                value={leftMetricQuery}
-                onFocus={() => setIsAutocompleteOpen(true)}
-                onClick={() => setIsAutocompleteOpen(true)}
-                onChange={(e) => {
-                  setLeftMetricQuery(e.target.value);
-                  setIsAutocompleteOpen(true);
-                  setHighlightedIndex(0);
-                }}
-                onKeyDown={handleAutocompleteKeyDown}
-                placeholder={
-                  replacingRowId
-                    ? "Type replacement measure, calc, or =formula..."
-                    : "+ Type measure, 2-pass calc, member, or =formula..."
-                }
-                aria-label="Search or add LookML measure or LookBase calculation"
-              />
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
-                  marginTop: 4,
-                  fontSize: 11,
-                  color: "#334155",
-                }}
-              >
-                <div style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 600, color: "#1e3a8a" }}>Include Members:</span>
-                  {availableMemberLevels.map((lvl) => {
-                    const isChecked = autocompleteMemberLevels.includes(lvl);
-                    return (
-                      <label
-                        key={`ac-lvl-${lvl}`}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 3,
-                          cursor: "pointer",
-                          fontWeight: isChecked ? 700 : 500,
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          data-testid={`autocomplete-level-L${lvl}`}
-                          checked={isChecked}
-                          onChange={() => {
-                            setIsAutocompleteOpen(true);
-                            setAutocompleteScrollTop(0);
-                            setAutocompleteMemberLevels((prev) =>
-                              prev.includes(lvl)
-                                ? prev.filter((x) => x !== lvl)
-                                : [...prev, lvl].sort((a, b) => a - b),
-                            );
-                          }}
-                        />
-                        <span>L{lvl}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-                <span style={{ fontSize: 10, color: "#64748b" }}>
-                  {autocompleteMatches.length} item{autocompleteMatches.length === 1 ? "" : "s"}
-                </span>
-              </div>
-              {isAutocompleteOpen && autocompleteMatches.length > 0 && (() => {
-                const ROW_HEIGHT = 48;
-                const vWin = getVirtualizedAutocompleteWindow(
-                  autocompleteMatches.length,
-                  autocompleteScrollTop,
-                  320,
-                  ROW_HEIGHT,
-                  5,
-                );
-                const visibleSlice = autocompleteMatches.slice(vWin.startIndex, vWin.endIndex);
-                return (
-                  <div
-                    className="lookbase-autocomplete-dropdown"
-                    role="listbox"
-                    data-testid="autocomplete-virtual-listbox"
-                    onScroll={(e) => setAutocompleteScrollTop(e.currentTarget.scrollTop)}
-                  >
-                    <div
-                      style={{
-                        height: vWin.totalHeight,
-                        position: "relative",
-                      }}
-                    >
-                      {visibleSlice.map((item, sliceIdx) => {
-                        const idx = vWin.startIndex + sliceIdx;
-                        return (
-                          <div
-                            key={item.id}
-                            role="option"
-                            aria-selected={idx === highlightedIndex}
-                            className={`lookbase-autocomplete-option ${idx === highlightedIndex ? "highlighted" : ""}`}
-                            style={{
-                              position: "absolute",
-                              top: idx * ROW_HEIGHT,
-                              left: 0,
-                              right: 0,
-                              height: ROW_HEIGHT,
-                            }}
-                            onMouseDown={(e) => {
-                              e.preventDefault();
-                              handleSelectAutocompleteItem(item);
-                            }}
-                          >
-                            <div className="lookbase-autocomplete-option-top">
-                              <span className="lookbase-autocomplete-option-label">{item.label}</span>
-                              <span className={`lookbase-cat-badge ${item.category}`}>
-                                {item.category.replace(/_/g, " ")}
-                              </span>
-                            </div>
-                            {item.description && (
-                              <div className="lookbase-autocomplete-option-desc">{item.description}</div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Left-Hand Side Metrics Down Rows Table */}
-            {selectedTimeframes.length > 1 && (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "4px 8px",
-                  background: "#f8fafc",
-                  borderBottom: "1px solid #cbd5e1",
-                  fontSize: 10,
-                }}
-              >
-                <span style={{ fontWeight: 600, color: "#334155" }}>Timeframe Slice:</span>
-                <div style={{ display: "inline-flex", gap: 4, flexWrap: "wrap" }}>
-                  {selectedTimeframes.map((tf) => {
-                    const isActiveTf = activeLeftTimeframe === tf;
-                    return (
-                      <button
-                        key={`left-tf-${tf}`}
-                        type="button"
-                        onClick={() => setLeftPaneTimeframe(tf)}
-                        style={{
-                          padding: "1px 6px",
-                          fontSize: 10,
-                          fontWeight: isActiveTf ? 700 : 500,
-                          borderRadius: 10,
-                          border: isActiveTf ? "1px solid #1d4ed8" : "1px solid #cbd5e1",
-                          background: isActiveTf ? "#dbeafe" : "#ffffff",
-                          color: isActiveTf ? "#1e3a8a" : "#334155",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {formatTimeframeShortLabel(tf)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            <div
-              id="lookbase-tour-left-table"
-              className="lookbase-left-metrics-table-wrap"
-              onClick={() => setIsAutocompleteOpen(false)}
-            >
-              <table className="lookbase-left-metrics-table">
-                <thead>
-                  <tr>
-                    <th>
-                      Metric / Account ({formatTimeframeShortLabel(activeLeftTimeframe)})
-                    </th>
-                    <th>Current</th>
-                    <th>Last Year</th>
-                    <th>YoY Var %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {leftMetricRows.map((mRow, idx) => {
-                    const curEval = evaluateLeftHandMetricRow(
-                      mRow,
-                      activeOutlineNode,
-                      parentOutlineNode,
-                      "Current",
-                      calcConfig,
-                      selectedTimeframes.length > 1 ? activeLeftTimeframe : undefined,
-                    );
-                    const lyEval = evaluateLeftHandMetricRow(
-                      mRow,
-                      activeOutlineNode,
-                      parentOutlineNode,
-                      "Last Year",
-                      calcConfig,
-                      selectedTimeframes.length > 1 ? activeLeftTimeframe : undefined,
-                    );
-                    const yoyPct =
-                      curEval.value !== null && lyEval.value !== null && lyEval.value !== 0
-                        ? (curEval.value - lyEval.value) / Math.abs(lyEval.value)
-                        : null;
-                    const isRowActive = activeMetricRowId === mRow.id;
-                    return (
-                      <tr
-                        key={mRow.id}
-                        className={isRowActive ? "active-metric-row" : ""}
-                        onClick={() => {
-                          setActiveMetricRowId(mRow.id);
-                          setActiveCellCoord(`A${idx + 2}`);
-                          setFormulaText(`=${mRow.formula || mRow.label}`);
-                        }}
-                      >
-                        <td
-                          className="metric-row-header"
-                          title="Click to inspect formula, or click Swap to replace via autocomplete"
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              gap: 4,
-                            }}
-                          >
-                            <span>{mRow.label}</span>
-                            <span style={{ display: "inline-flex", gap: 3 }}>
-                              <button
-                                style={{
-                                  border: "1px solid #94a3b8",
-                                  background: "#f8fafc",
-                                  fontSize: 9,
-                                  cursor: "pointer",
-                                  padding: "0 3px",
-                                }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setReplacingRowId(mRow.id);
-                                  setIsAutocompleteOpen(true);
-                                  autocompleteInputRef.current?.focus();
-                                }}
-                                title="Replace this metric row using autocomplete"
-                              >
-                                ⇄
-                              </button>
-                              <button
-                                style={{
-                                  border: "1px solid #cbd5e1",
-                                  background: "#fff",
-                                  fontSize: 9,
-                                  cursor: "pointer",
-                                  padding: "0 3px",
-                                }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  updateAndPersistLeftMetrics((prev) =>
-                                    prev.filter((r) => r.id !== mRow.id),
-                                  );
-                                }}
-                                title="Remove metric row"
-                              >
-                                ×
-                              </button>
-                            </span>
-                          </div>
-                        </td>
-                        <td>{curEval.formatted}</td>
-                        <td>{lyEval.formatted}</td>
-                        <td
-                          style={{
-                            color:
-                              yoyPct === null ? "#64748b" : yoyPct >= 0 ? "#166534" : "#b91c1c",
-                            fontWeight: 600,
-                          }}
-                        >
-                          {yoyPct !== null ? formatLookBaseValue(yoyPct, "+0.0%;-0.0%;0.0%") : "—"}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        <LookBaseLeftMetricsPane
+          showLeftMetricsPane={showLeftMetricsPane}
+          isSkeletonLoading={Boolean(core40SDK && !hostQueryResponse && !initialQueryResolved)}
+          activeOutlineNode={activeOutlineNode}
+          parentOutlineNode={parentOutlineNode}
+          activeHierarchyDef={activeHierarchyDef}
+          selectedOutlineMemberId={selectedOutlineMemberId}
+          autocompleteInputRef={autocompleteInputRef}
+          leftMetricQuery={leftMetricQuery}
+          setLeftMetricQuery={setLeftMetricQuery}
+          isAutocompleteOpen={isAutocompleteOpen}
+          setIsAutocompleteOpen={setIsAutocompleteOpen}
+          highlightedIndex={highlightedIndex}
+          setHighlightedIndex={setHighlightedIndex}
+          handleAutocompleteKeyDown={handleAutocompleteKeyDown}
+          replacingRowId={replacingRowId}
+          setReplacingRowId={setReplacingRowId}
+          availableMemberLevels={availableMemberLevels}
+          autocompleteMemberLevels={autocompleteMemberLevels}
+          setAutocompleteMemberLevels={setAutocompleteMemberLevels}
+          autocompleteScrollTop={autocompleteScrollTop}
+          setAutocompleteScrollTop={setAutocompleteScrollTop}
+          autocompleteMatches={autocompleteMatches}
+          handleSelectAutocompleteItem={handleSelectAutocompleteItem}
+          selectedTimeframes={selectedTimeframes}
+          activeLeftTimeframe={activeLeftTimeframe}
+          setLeftPaneTimeframe={setLeftPaneTimeframe}
+          leftMetricRows={leftMetricRows}
+          calcConfig={calcConfig}
+          activeMetricRowId={activeMetricRowId}
+          setActiveMetricRowId={setActiveMetricRowId}
+          setActiveCellCoord={setActiveCellCoord}
+          setFormulaText={setFormulaText}
+          updateAndPersistLeftMetrics={updateAndPersistLeftMetrics}
+        />
 
         {/* Core viz-report-table Grid Wrapper */}
         <div
@@ -3479,7 +2633,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           onClick={handleGridClick}
           onDoubleClick={handleGridDoubleClick}
         >
-          {effectiveQueryResponse && artifactLoaded ? (
+          {effectiveQueryResponse &&
+          artifactLoaded &&
+          !(core40SDK && !hostQueryResponse && !initialQueryResolved) ? (
             <ReportTable
               data={effectiveQueryResponse.data || []}
               queryResponse={effectiveQueryResponse}
@@ -3491,917 +2647,123 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               }}
             />
           ) : (
-            <div style={{ padding: 16, color: "#475569" }}>
-              {isBusy
-                ? "Loading LookBase OLAP Cube..."
-                : "Select an Explore query or wait for cube initialization."}
+            <div className="lookbase-skeleton-grid" data-testid="lookbase-skeleton-grid">
+              <table className="lookbase-skeleton-table">
+                <thead>
+                  <tr>
+                    <th>{activeHierarchyDef?.shortLabel || "Outline Hierarchy"}</th>
+                    {Array.from({ length: 6 }, (_, cIdx) => (
+                      <th key={`skel-th-${cIdx}`}>
+                        <span
+                          className="lookbase-skeleton-bar"
+                          style={{
+                            width: cIdx % 2 === 0 ? 78 : 64,
+                            background:
+                              "linear-gradient(90deg, rgba(255,255,255,0.22) 25%, rgba(255,255,255,0.42) 50%, rgba(255,255,255,0.22) 75%)",
+                            backgroundSize: "200% 100%",
+                          }}
+                        />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from({ length: 12 }, (_, rIdx) => {
+                    const isRoot = rIdx === 0;
+                    const indent = rIdx === 0 ? 0 : rIdx <= 3 ? 16 : rIdx <= 7 ? 32 : 48;
+                    return (
+                      <tr
+                        key={`skel-tr-${rIdx}`}
+                        className={isRoot ? "skeleton-root" : ""}
+                      >
+                        <td style={{ paddingLeft: 10 + indent }}>
+                          <span
+                            className="lookbase-skeleton-bar"
+                            style={{ width: isRoot ? 110 : rIdx % 2 === 0 ? 128 : 96 }}
+                          />
+                        </td>
+                        {Array.from({ length: 6 }, (_, cIdx) => (
+                          <td key={`skel-td-${rIdx}-${cIdx}`}>
+                            <span
+                              className="lookbase-skeleton-bar"
+                              style={{ width: (rIdx + cIdx) % 2 === 0 ? 68 : 54 }}
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
       </div>
 
-      {/* Dynamic Hierarchy Selector & Multi-Level Subtree Filter Modal */}
-      {isHierarchyModalOpen && (
-        <div
-          className="lookbase-modal-backdrop"
-          onClick={() => setIsHierarchyModalOpen(false)}
-        >
-          <div
-            className="lookbase-modal"
-            style={{ maxWidth: 680 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="lookbase-modal-header">
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a" }}>
-                  Hierarchy Selector — {activeHierarchyDef.label}
-                </div>
-                <div style={{ fontSize: 11, color: "#475569" }}>
-                  Active Hierarchy: <strong>{activeHierarchyDef.shortLabel}</strong> · Levels:{" "}
-                  <code>{activeHierarchyDef.levelLabels.join(" → ")}</code> (
-                  {allHierarchyNodes.length} total nodes)
-                </div>
-              </div>
-              <button
-                className="lookbase-btn"
-                onClick={() => setIsHierarchyModalOpen(false)}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="lookbase-modal-body">
-              {/* Section A: Active Hierarchy Tabs + Add/Remove Explore Hierarchies */}
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
-                  padding: "6px 8px",
-                  marginBottom: 8,
-                  background: "#f8fafc",
-                  border: "1px solid #cbd5e1",
-                  borderRadius: 4,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "#1e3a8a" }}>
-                    Hierarchies:
-                  </span>
-                  {effectiveAvailableHierarchies
-                    .filter((h) => effectiveEnabledHierarchyIds.includes(h.id))
-                    .map((h) => {
-                      const isActive = h.id === effectiveActiveHierarchyId;
-                      return (
-                        <span
-                          key={`tab-${h.id}`}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            borderRadius: 4,
-                            border: isActive ? "1px solid #1d4ed8" : "1px solid #cbd5e1",
-                            background: isActive ? "#1d4ed8" : "#ffffff",
-                            color: isActive ? "#ffffff" : "#1e293b",
-                            overflow: "hidden",
-                          }}
-                        >
-                          <button
-                            type="button"
-                            data-testid={`hierarchy-tab-${h.id}`}
-                            onClick={() => handleSwitchHierarchy(h.id)}
-                            style={{
-                              border: "none",
-                              background: "transparent",
-                              color: "inherit",
-                              fontSize: 11,
-                              fontWeight: isActive ? 700 : 600,
-                              padding: "3px 8px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            {h.shortLabel}
-                          </button>
-                          {effectiveEnabledHierarchyIds.length > 1 && (
-                            <button
-                              type="button"
-                              title={`Remove ${h.shortLabel} from active selector`}
-                              onClick={() => {
-                                const remaining = effectiveEnabledHierarchyIds.filter(
-                                  (id) => id !== h.id,
-                                );
-                                setEnabledHierarchyIds(remaining);
-                                if (effectiveActiveHierarchyId === h.id && remaining.length > 0) {
-                                  handleSwitchHierarchy(remaining[0]);
-                                }
-                              }}
-                              style={{
-                                border: "none",
-                                borderLeft: isActive
-                                  ? "1px solid rgba(255,255,255,0.3)"
-                                  : "1px solid #e2e8f0",
-                                background: "transparent",
-                                color: "inherit",
-                                fontSize: 10,
-                                padding: "3px 5px",
-                                cursor: "pointer",
-                              }}
-                            >
-                              ×
-                            </button>
-                          )}
-                        </span>
-                      );
-                    })}
-                </div>
+      <LookBaseHierarchyModal
+        isOpen={isHierarchyModalOpen}
+        onClose={() => setIsHierarchyModalOpen(false)}
+        activeHierarchyDef={activeHierarchyDef}
+        allHierarchyNodes={allHierarchyNodes}
+        allHierarchyNodeMap={allHierarchyNodeMap}
+        effectiveAvailableHierarchies={effectiveAvailableHierarchies}
+        effectiveEnabledHierarchyIds={effectiveEnabledHierarchyIds}
+        effectiveActiveHierarchyId={effectiveActiveHierarchyId}
+        setEnabledHierarchyIds={setEnabledHierarchyIds}
+        handleSwitchHierarchy={handleSwitchHierarchy}
+        exploreHierarchyToAdd={exploreHierarchyToAdd}
+        setExploreHierarchyToAdd={setExploreHierarchyToAdd}
+        persistSavedExpansion={persistSavedExpansion}
+        setExpandedPaths={setExpandedPaths}
+        modalUnfoldedIds={modalUnfoldedIds}
+        setModalUnfoldedIds={setModalUnfoldedIds}
+        modalLoadingParentIds={modalLoadingParentIds}
+        handleToggleModalUnfold={handleToggleModalUnfold}
+        core40SDK={core40SDK}
+        effectiveModelRef={effectiveModelRef}
+        pcConfig={pcConfig}
+        activeHierarchyId={activeHierarchyId}
+        calcConfigRef={calcConfigRef}
+        setHierarchyCatalogNodes={setHierarchyCatalogNodes}
+        loadStandaloneOutline={loadStandaloneOutline}
+        povVersion={povVersion}
+        povTimeframe={povTimeframe}
+        povSource={povSource}
+        povYear={povYear}
+        hierarchyFilterSearch={hierarchyFilterSearch}
+        setHierarchyFilterSearch={setHierarchyFilterSearch}
+        savedExpandedMemberIds={savedExpandedMemberIds}
+      />
 
-                {/* Add Hierarchy from Looker Explore */}
-                {effectiveAvailableHierarchies.some(
-                  (h) => !effectiveEnabledHierarchyIds.includes(h.id),
-                ) && (
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <select
-                      aria-label="Add Hierarchy from Looker Explore"
-                      style={{
-                        height: 22,
-                        fontSize: 11,
-                        border: "1px solid #cbd5e1",
-                        borderRadius: 3,
-                        padding: "0 4px",
-                      }}
-                      value={
-                        effectiveAvailableHierarchies.find(
-                          (h) =>
-                            h.id === exploreHierarchyToAdd &&
-                            !effectiveEnabledHierarchyIds.includes(h.id),
-                        )?.id ||
-                        effectiveAvailableHierarchies.find(
-                          (h) => !effectiveEnabledHierarchyIds.includes(h.id),
-                        )?.id ||
-                        ""
-                      }
-                      onChange={(e) => setExploreHierarchyToAdd(e.target.value)}
-                    >
-                      {effectiveAvailableHierarchies
-                        .filter((h) => !effectiveEnabledHierarchyIds.includes(h.id))
-                        .map((h) => (
-                          <option key={`add-opt-${h.id}`} value={h.id}>
-                            + {h.label}
-                          </option>
-                        ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="lookbase-btn primary"
-                      onClick={() => {
-                        const targetToAdd =
-                          effectiveAvailableHierarchies.find(
-                            (h) =>
-                              h.id === exploreHierarchyToAdd &&
-                              !effectiveEnabledHierarchyIds.includes(h.id),
-                          )?.id ||
-                          effectiveAvailableHierarchies.find(
-                            (h) => !effectiveEnabledHierarchyIds.includes(h.id),
-                          )?.id;
-                        if (targetToAdd) {
-                          handleSwitchHierarchy(targetToAdd);
-                        }
-                      }}
-                    >
-                      + Add &amp; Switch
-                    </button>
-                  </div>
-                )}
-              </div>
+      <LookBaseSettingsModal
+        isOpen={isSettingsModalOpen}
+        canUpdateSettings={canUpdateSettings}
+        onClose={() => setIsSettingsModalOpen(false)}
+        currentUser={currentUser}
+        isCurrentUserAdmin={isCurrentUserAdmin}
+        settingsDraft={settingsDraft}
+        setSettingsDraft={setSettingsDraft}
+        settingsGroupIdsInput={settingsGroupIdsInput}
+        setSettingsGroupIdsInput={setSettingsGroupIdsInput}
+        settingsUserIdsInput={settingsUserIdsInput}
+        setSettingsUserIdsInput={setSettingsUserIdsInput}
+        rebuildCubeGroupIdsInput={rebuildCubeGroupIdsInput}
+        setRebuildCubeGroupIdsInput={setRebuildCubeGroupIdsInput}
+        rebuildCubeUserIdsInput={rebuildCubeUserIdsInput}
+        setRebuildCubeUserIdsInput={setRebuildCubeUserIdsInput}
+        isDiscoveringBiTables={isDiscoveringBiTables}
+        refreshBiEngineTables={refreshBiEngineTables}
+        biEngineTables={biEngineTables}
+        biEngineProjectId={biEngineProjectId}
+        canRebuildCube={canRebuildCube}
+        isBusy={isBusy}
+        handleRebuildCube={handleRebuildCube}
+        settingsFormError={settingsFormError}
+        isSavingSettings={isSavingSettings}
+        handleSaveSettings={handleSaveSettings}
+      />
 
-              {/* Section B: Level Filter Quick-Pills (Expand / Filter by Hierarchy Level) */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 6,
-                  marginBottom: 8,
-                  fontSize: 11,
-                }}
-              >
-                <div style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 600, color: "#334155" }}>Filter / Expand Level:</span>
-                  {activeHierarchyDef.levelLabels.map((lvlLabel, lvlIdx) => (
-                    <button
-                      key={`lvl-pill-${lvlIdx}`}
-                      type="button"
-                      className="lookbase-btn"
-                      onClick={async () => {
-                        const parentIdsUpToLevel = allHierarchyNodes
-                          .filter((n) => !n.isLeaf && n.level < lvlIdx)
-                          .map((n) => n.memberId);
-                        const nextIds = Array.from(new Set(["ROOT", "ALL", ...parentIdsUpToLevel]));
-                        const nextPaths = deriveExpandedPathsFromMemberIds(
-                          nextIds,
-                          allHierarchyNodeMap,
-                        );
-                        persistSavedExpansion(nextIds, nextPaths);
-                        setExpandedPaths(nextPaths);
-                        setModalUnfoldedIds(nextIds);
-                        if (core40SDK && lvlIdx >= 5) {
-                          const l5Parents = allHierarchyNodes
-                            .filter((n) => !n.isLeaf && n.level === 5)
-                            .slice(0, 40)
-                            .map((n) => n.memberId);
-                          if (l5Parents.length > 0) {
-                            const children = await fetchHierarchyModalChildren(
-                              core40SDK,
-                              effectiveModelRef.current,
-                              l5Parents,
-                              pcConfig,
-                              5000,
-                              activeHierarchyId,
-                              calcConfigRef.current,
-                            );
-                            if (children.length > 0) {
-                              setHierarchyCatalogNodes((prev) => {
-                                const byId = new Map<string, OutlineNodeMeta>();
-                                for (const existing of prev) byId.set(existing.memberId, existing);
-                                for (const child of children) byId.set(child.memberId, child);
-                                return sortOutlineNodesTreeOrder(Array.from(byId.values()));
-                              });
-                            }
-                          }
-                        }
-                        loadStandaloneOutline(
-                          povVersion,
-                          povTimeframe,
-                          povSource,
-                          povYear,
-                          nextIds.slice(0, 60),
-                          activeHierarchyId,
-                        );
-                      }}
-                      title={`Expand hierarchy down to L${lvlIdx}: ${lvlLabel}`}
-                    >
-                      L{lvlIdx}: {lvlLabel}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Section C: Search & Bulk Branch Selection */}
-              <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
-                <input
-                  className="lookbase-autocomplete-input"
-                  value={hierarchyFilterSearch}
-                  onChange={(e) => setHierarchyFilterSearch(e.target.value)}
-                  placeholder={`Search ${activeHierarchyDef.shortLabel} levels & members...`}
-                />
-                <button
-                  className="lookbase-btn"
-                  title="Select all branches across the entire hierarchy"
-                  onClick={() => {
-                    const allNonLeafIds = allHierarchyNodes
-                      .filter((n) => !n.isLeaf)
-                      .map((n) => n.memberId);
-                    const nextIds = Array.from(new Set(["ROOT", "ALL", ...allNonLeafIds]));
-                    const nextPaths = deriveExpandedPathsFromMemberIds(
-                      nextIds,
-                      allHierarchyNodeMap,
-                    );
-                    persistSavedExpansion(nextIds, nextPaths);
-                    setExpandedPaths(nextPaths);
-                  }}
-                >
-                  Select All
-                </button>
-                <button
-                  className="lookbase-btn"
-                  title="Select default L0-L1 branches (Some)"
-                  onClick={() => {
-                    const initIds = activeHierarchyDef.defaultExpandedIds || ["ROOT", "ALL"];
-                    const initPaths = deriveExpandedPathsFromMemberIds(
-                      initIds,
-                      allHierarchyNodeMap,
-                      activeHierarchyDef.defaultExpandedPaths || [activeHierarchyDef.rootLabel],
-                    );
-                    persistSavedExpansion(initIds, initPaths);
-                    setExpandedPaths(initPaths);
-                  }}
-                >
-                  Select Default
-                </button>
-                <button
-                  className="lookbase-btn"
-                  title="Collapse all branches (Select None)"
-                  onClick={() => {
-                    const nextIds = ["ROOT"];
-                    const nextPaths: string[] = [];
-                    persistSavedExpansion(nextIds, nextPaths);
-                    setExpandedPaths(nextPaths);
-                  }}
-                >
-                  Select None
-                </button>
-              </div>
-              <div
-                data-testid="hierarchy-modal-scroll"
-                style={{
-                  maxHeight: 340,
-                  overflowY: "auto",
-                  border: "1px solid #cbd5e1",
-                  position: "relative",
-                }}
-              >
-                {(() => {
-                  const visibleNodes = getVisibleHierarchyModalNodes(
-                    allHierarchyNodes,
-                    modalUnfoldedIds,
-                    hierarchyFilterSearch,
-                  );
-                  const childrenByParent: Record<string, OutlineNodeMeta[]> = {};
-                  const roots: OutlineNodeMeta[] = [];
-
-                  for (const n of visibleNodes) {
-                    if (n.level === 0 || n.parentId === "ROOT") {
-                      roots.push(n);
-                    } else {
-                      if (!childrenByParent[n.parentId]) {
-                        childrenByParent[n.parentId] = [];
-                      }
-                      childrenByParent[n.parentId].push(n);
-                    }
-                  }
-
-                  const renderRow = (node: OutlineNodeMeta) => {
-                    const triState = getHierarchyNodeTriState(
-                      node,
-                      allHierarchyNodes,
-                      savedExpandedMemberIds,
-                    );
-                    const stickyStyle = getHierarchyRowStickyStyle(node.level, 30);
-                    const isUnfolded =
-                      Boolean(hierarchyFilterSearch.trim()) ||
-                      modalUnfoldedIds.includes(node.memberId);
-                    const isLoadingChildren = modalLoadingParentIds.includes(node.memberId);
-
-                    return (
-                      <div
-                        key={`row:${node.memberId}`}
-                        data-tree-row={node.memberId}
-                        data-level={node.level}
-                        style={{
-                          ...stickyStyle,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: "0 8px",
-                          paddingLeft: 8 + getOutlineIndentationPx(node.level, 16),
-                          borderBottom: "1px solid #e2e8f0",
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          {!node.isLeaf ? (
-                            <button
-                              type="button"
-                              data-tree-chevron={node.memberId}
-                              onClick={() => handleToggleModalUnfold(node)}
-                              style={{
-                                width: 18,
-                                height: 18,
-                                padding: 0,
-                                border: "1px solid #cbd5e1",
-                                borderRadius: 3,
-                                background: isUnfolded ? "#eff6ff" : "#ffffff",
-                                color: "#334155",
-                                fontSize: 10,
-                                lineHeight: "16px",
-                                cursor: "pointer",
-                                display: "inline-flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                              title={isUnfolded ? `Collapse ${node.label}` : `Expand ${node.label}`}
-                            >
-                              {isLoadingChildren ? "…" : isUnfolded ? "▾" : "▸"}
-                            </button>
-                          ) : (
-                            <span style={{ width: 18, display: "inline-block" }} />
-                          )}
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 6,
-                              cursor: "pointer",
-                            }}
-                            title={
-                              node.isLeaf
-                                ? `Toggle ${node.label}`
-                                : `Click to cycle selection for ${node.label}`
-                            }
-                          >
-                            <input
-                              type="checkbox"
-                              data-tree-checkbox={node.memberId}
-                              checked={triState === "all"}
-                              ref={(el) => {
-                                if (el) {
-                                  el.indeterminate = triState === "some";
-                                }
-                              }}
-                              onChange={() => {
-                                const nextIds = toggleHierarchyNodeTriState(
-                                  node,
-                                  allHierarchyNodes,
-                                  savedExpandedMemberIds,
-                                );
-                                const nextPaths = deriveExpandedPathsFromMemberIds(
-                                  nextIds,
-                                  allHierarchyNodeMap,
-                                );
-                                persistSavedExpansion(nextIds, nextPaths);
-                                setExpandedPaths(nextPaths);
-                              }}
-                            />
-                            <span style={{ fontWeight: node.isLeaf ? 400 : 600 }}>
-                              {node.label}
-                            </span>
-                          </label>
-                        </div>
-                        <span style={{ fontSize: 10, color: "#64748b" }}>{node.memberId}</span>
-                      </div>
-                    );
-                  };
-
-                  const renderBranch = (node: OutlineNodeMeta): React.ReactNode => {
-                    const visibleChildren = childrenByParent[node.memberId] || [];
-                    if (node.isLeaf || visibleChildren.length === 0) {
-                      return renderRow(node);
-                    }
-                    return (
-                      <div
-                        key={`branch:${node.memberId}`}
-                        data-tree-branch={node.memberId}
-                        data-level={node.level}
-                      >
-                        {renderRow(node)}
-                        <div data-tree-children={node.memberId}>
-                          {visibleChildren.map((child) => renderBranch(child))}
-                        </div>
-                      </div>
-                    );
-                  };
-
-                  return roots.length > 0
-                    ? roots.map((r) => renderBranch(r))
-                    : visibleNodes.map((n) => renderRow(n));
-                })()}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginTop: 10,
-                }}
-              >
-                <span style={{ fontSize: 11, color: "#475569" }}>
-                  Saved expanded parent IDs: <strong>{savedExpandedMemberIds.join(", ")}</strong>
-                </span>
-                <button
-                  className="lookbase-btn primary"
-                  onClick={() => {
-                    setIsHierarchyModalOpen(false);
-                    loadStandaloneOutline(
-                      povVersion,
-                      povTimeframe,
-                      povSource,
-                      povYear,
-                      savedExpandedMemberIds,
-                      activeHierarchyId,
-                    );
-                  }}
-                >
-                  Run Consolidated Batch Query Now
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Configuration Settings Modal (lkrdev/explore-blending pattern: Settings Access + Rebuild Cube Access) */}
-      {isSettingsModalOpen && canUpdateSettings && (
-        <div
-          className="lookbase-modal-backdrop"
-          onClick={() => setIsSettingsModalOpen(false)}
-        >
-          <div
-            className="lookbase-modal"
-            style={{ maxWidth: 620 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="lookbase-modal-header">
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a" }}>
-                  Configuration Settings
-                </div>
-                <div style={{ fontSize: 11, color: "#475569" }}>
-                  Manage who can edit LookBase Configuration Settings and who can trigger Rebuild Cube.
-                </div>
-              </div>
-              <button
-                className="lookbase-btn"
-                onClick={() => setIsSettingsModalOpen(false)}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="lookbase-modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {/* Current User Identity & Group Membership Helper Banner */}
-              <div
-                style={{
-                  background: "#f8fafc",
-                  border: "1px solid #cbd5e1",
-                  borderRadius: 4,
-                  padding: "8px 10px",
-                  fontSize: 11,
-                  color: "#334155",
-                }}
-              >
-                <div>
-                  <strong>Current User:</strong>{" "}
-                  {currentUser?.display_name || currentUser?.email || "Authenticated User"}{" "}
-                  (ID: <code>{currentUser?.id != null ? String(currentUser.id) : "N/A"}</code>
-                  {currentUser?.email ? `, Email: ${currentUser.email}` : ""})
-                </div>
-                <div style={{ marginTop: 3 }}>
-                  <strong>Role:</strong>{" "}
-                  <span
-                    style={{
-                      fontWeight: 600,
-                      color: isCurrentUserAdmin ? "#15803d" : "#475569",
-                    }}
-                  >
-                    {isCurrentUserAdmin ? "Looker Admin (Role ID 2)" : "Standard User"}
-                  </span>{" "}
-                  · <strong>Your Group IDs:</strong>{" "}
-                  <code>
-                    {currentUser?.group_ids?.length
-                      ? currentUser.group_ids.join(", ")
-                      : "None"}
-                  </code>
-                </div>
-              </div>
-
-              {/* Section 1: Who Can Edit Settings */}
-              <div
-                style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: 4,
-                  padding: 12,
-                  background: "#ffffff",
-                }}
-              >
-                <div style={{ fontWeight: 700, fontSize: 12, color: "#0f172a", marginBottom: 6 }}>
-                  1. Settings Access Control (Who Can Edit Settings)
-                </div>
-                <label
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: "#1e293b",
-                    cursor: "pointer",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={settingsDraft.restrict_settings}
-                    onChange={(e) =>
-                      setSettingsDraft((prev) => ({
-                        ...prev,
-                        restrict_settings: e.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Restrict Settings Access</span>
-                </label>
-                <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
-                  When enabled, only Looker Admins (Role ID 2), users in the specified Group IDs, or
-                  specified User IDs / Emails can access and save Configuration Settings.
-                </div>
-
-                {settingsDraft.restrict_settings && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-                    <div>
-                      <label
-                        style={{
-                          display: "block",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: "#334155",
-                          marginBottom: 3,
-                        }}
-                      >
-                        Allowed Group IDs (comma-separated)
-                      </label>
-                      <input
-                        className="lookbase-autocomplete-input"
-                        value={settingsGroupIdsInput}
-                        onChange={(e) => setSettingsGroupIdsInput(e.target.value)}
-                        placeholder="e.g., 1, 2, 3"
-                      />
-                    </div>
-                    <div>
-                      <label
-                        style={{
-                          display: "block",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: "#334155",
-                          marginBottom: 3,
-                        }}
-                      >
-                        Allowed User IDs or Emails (comma-separated)
-                      </label>
-                      <input
-                        className="lookbase-autocomplete-input"
-                        value={settingsUserIdsInput}
-                        onChange={(e) => setSettingsUserIdsInput(e.target.value)}
-                        placeholder="e.g., 42, planner@company.com"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Section 2: Who Can Rebuild Cube */}
-              <div
-                style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: 4,
-                  padding: 12,
-                  background: "#ffffff",
-                }}
-              >
-                <div style={{ fontWeight: 700, fontSize: 12, color: "#0f172a", marginBottom: 6 }}>
-                  2. Rebuild Cube Access Control (Who Can Rebuild Cube)
-                </div>
-                <label
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: "#1e293b",
-                    cursor: "pointer",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={settingsDraft.restrict_rebuild_cube}
-                    onChange={(e) =>
-                      setSettingsDraft((prev) => ({
-                        ...prev,
-                        restrict_rebuild_cube: e.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Restrict Rebuild Cube Access</span>
-                </label>
-                <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
-                  When enabled, only Looker Admins (Role ID 2), users in the specified Group IDs, or
-                  specified User IDs / Emails can see and trigger <strong>Calc All (Rebuild Cube)</strong>{" "}
-                  and <strong>Calc Sales PDT</strong>.
-                </div>
-
-                {settingsDraft.restrict_rebuild_cube && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-                    <div>
-                      <label
-                        style={{
-                          display: "block",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: "#334155",
-                          marginBottom: 3,
-                        }}
-                      >
-                        Allowed Group IDs for Rebuild Cube (comma-separated)
-                      </label>
-                      <input
-                        className="lookbase-autocomplete-input"
-                        value={rebuildCubeGroupIdsInput}
-                        onChange={(e) => setRebuildCubeGroupIdsInput(e.target.value)}
-                        placeholder="e.g., 1, 2, 3"
-                      />
-                    </div>
-                    <div>
-                      <label
-                        style={{
-                          display: "block",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: "#334155",
-                          marginBottom: 3,
-                        }}
-                      >
-                        Allowed User IDs or Emails for Rebuild Cube (comma-separated)
-                      </label>
-                      <input
-                        className="lookbase-autocomplete-input"
-                        value={rebuildCubeUserIdsInput}
-                        onChange={(e) => setRebuildCubeUserIdsInput(e.target.value)}
-                        placeholder="e.g., 42, fpa-lead@company.com"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Section 3: BigQuery BI Engine Pinning — List All Candidate Shared Tables */}
-              <div
-                style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: 4,
-                  padding: 12,
-                  background: "#ffffff",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    marginBottom: 6,
-                  }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 12, color: "#0f172a" }}>
-                      3. BigQuery BI Engine Pinning (<code>ALTER BI_CAPACITY</code>)
-                    </div>
-                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
-                      All shared LookBase PDT tables listed below are pinned to BigQuery BI Engine
-                      memory when the base cube is built or rebuilt.
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="lookbase-btn"
-                    disabled={isDiscoveringBiTables}
-                    onClick={refreshBiEngineTables}
-                  >
-                    {isDiscoveringBiTables ? "Refreshing..." : "Refresh Table List"}
-                  </button>
-                </div>
-
-                <div
-                  style={{
-                    maxHeight: 150,
-                    overflowY: "auto",
-                    border: "1px solid #cbd5e1",
-                    borderRadius: 4,
-                    background: "#f8fafc",
-                    padding: 6,
-                    fontSize: 11,
-                  }}
-                >
-                  {biEngineTables.map((tbl, idx) => (
-                    <div
-                      key={tbl.viewName}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "3px 4px",
-                        borderBottom:
-                          idx < biEngineTables.length - 1 ? "1px solid #e2e8f0" : "none",
-                      }}
-                    >
-                      <span>
-                        <strong>{tbl.viewName}</strong>{" "}
-                        <span style={{ color: "#64748b" }}>({tbl.label})</span>
-                      </span>
-                      <code style={{ fontSize: 10, color: "#0f172a" }}>{tbl.datasetTable}</code>
-                    </div>
-                  ))}
-                </div>
-
-                <div style={{ marginTop: 8 }}>
-                  <div
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 600,
-                      color: "#334155",
-                      marginBottom: 3,
-                    }}
-                  >
-                    Generated BigQuery DDL (<code>preferred_tables</code>):
-                  </div>
-                  <pre
-                    style={{
-                      margin: 0,
-                      padding: "6px 8px",
-                      fontSize: 10,
-                      background: "#0f172a",
-                      color: "#f8fafc",
-                      borderRadius: 4,
-                      overflowX: "auto",
-                      maxHeight: 110,
-                    }}
-                  >
-                    {buildAlterBiCapacitySql(biEngineProjectId, biEngineTables, "us")}
-                  </pre>
-                </div>
-
-                {canRebuildCube && (
-                  <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
-                    <button
-                      type="button"
-                      className="lookbase-btn"
-                      disabled={isBusy}
-                      onClick={() => handleRebuildCube("long_metrics_base")}
-                    >
-                      Rebuild Base Cube &amp; Pin All Listed Tables to BI Engine
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {settingsFormError && (
-                <div
-                  style={{
-                    background: "#fef2f2",
-                    border: "1px solid #fecaca",
-                    color: "#b91c1c",
-                    borderRadius: 4,
-                    padding: "8px 10px",
-                    fontSize: 11,
-                  }}
-                >
-                  {settingsFormError}
-                </div>
-              )}
-
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "flex-end",
-                  gap: 8,
-                  marginTop: 4,
-                }}
-              >
-                <button
-                  className="lookbase-btn"
-                  disabled={isSavingSettings}
-                  onClick={() => setIsSettingsModalOpen(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="lookbase-btn primary"
-                  disabled={isSavingSettings}
-                  onClick={handleSaveSettings}
-                >
-                  {isSavingSettings ? "Saving..." : "Save Configuration"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Stacked Bottom-Right Stateful Toast Container (lookbase-toasts skill) */}
-      {toasts.length > 0 && (
-        <div
-          id="lookbase-toast-stack"
-          className="lookbase-toast-stack"
-          role="status"
-          aria-live="polite"
-        >
-          {toasts.map((t) => (
-            <div key={t.id} className={`lookbase-toast ${t.variant}`}>
-              <span className="lookbase-toast-left">
-                {t.variant === "info" && <span className="lookbase-toast-spinner" />}
-                {t.variant === "success" && <span aria-hidden="true">✓</span>}
-                {t.variant === "error" && <span aria-hidden="true">⚠</span>}
-                <span>{t.message}</span>
-              </span>
-              <button
-                type="button"
-                className="lookbase-toast-close"
-                onClick={() => dismissToast(t.id)}
-                title="Dismiss notification"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      <LookBaseToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 };

@@ -72,8 +72,13 @@ export async function loadUserPrefsArtifact(
   user: LookBaseCurrentUser | null;
   prefs: LookBaseUserPrefs;
 }> {
-  const localDismissed =
-    typeof window !== "undefined" && window.localStorage?.getItem(TOUR_STORAGE_KEY) === "true";
+  let localDismissed = false;
+  try {
+    localDismissed =
+      typeof window !== "undefined" && window.localStorage?.getItem(TOUR_STORAGE_KEY) === "true";
+  } catch {
+    // Storage is disabled inside Looker extension data: URLs
+  }
   const localGuideIds = readLocalDismissedGuideIds();
 
   if (!core40SDK || typeof core40SDK.me !== "function" || typeof core40SDK.artifact !== "function") {

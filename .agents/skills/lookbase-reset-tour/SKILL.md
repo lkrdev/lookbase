@@ -7,41 +7,35 @@ description: >
   or re-enable the guided tour for yourself or another user.
 ---
 
-# Skill: Reset LookBase Tour & User Preferences Artifact (`lookbase-reset-tour`)
+# Reset LookBase tour and user preferences artifact
 
-LookBase persists each user's dismissed guide UUIDs (`dismissedGuideIds: string[]`, `lastDismissedGuideId: string`, `tourDismissed: boolean`, `quickStartDismissed: boolean`), saved outline expansions (`savedExpandedMemberIds`, `savedExpandedPaths`), left-hand metrics (`leftHandMetricIds`), and POV selections in the **Looker Artifacts API**:
+LookBase persists each user's dismissed guide UUIDs (`dismissedGuideIds: string[]`, `lastDismissedGuideId: string`, `tourDismissed: boolean`, `quickStartDismissed: boolean`), saved outline expansions (`savedExpandedMemberIds`, `savedExpandedPaths`), left-hand metrics (`leftHandMetricIds`), and POV selections in the Looker Artifacts API:
 
-- **Artifact Key:** `user_<user_id>_lookbase_prefs`
-- **Artifact Namespaces:** `"lookbase::lookbase"` (mounted Looker extension ID) and `"lookbase"` (standalone fallback)
-- **Built-in Guide UUIDs:**
-  - `6f8a1c30-4e2b-4d9a-9c11-100000000001` — *Guide 1: LookBase Core & Outline Hierarchy*
-  - `6f8a1c30-4e2b-4d9a-9c11-100000000002` — *Guide 2: Left-Hand Metrics, Formula Bar & Sandboxes*
+- The artifact key is `user_<user_id>_lookbase_prefs`.
+- The artifact namespaces are `"lookbase::lookbase"` (mounted Looker extension ID) and `"lookbase"` (standalone fallback).
+- The built-in guide UUIDs are `6f8a1c30-4e2b-4d9a-9c11-100000000001` (Guide 1: LookBase Core & Outline Hierarchy) and `6f8a1c30-4e2b-4d9a-9c11-100000000002` (Guide 2: Left-Hand Metrics, Formula Bar & Sandboxes).
 
-Removing this artifact (or removing a specific `guide_id` UUID from `dismissedGuideIds`) causes the unseen guide to launch again on the user's next visit (at most 1 unseen guide per refresh).
+Removing this artifact (or removing a specific `guide_id` UUID from `dismissedGuideIds`) causes the unseen guide to launch again on the user's next visit, up to one unseen guide per refresh.
 
----
+## Check for .env file or OAuth fallback
 
-## Step 1: Check for `.env` File (or OAuth Fallback)
-
-Always check whether a `.env` file exists in the repository root first:
+Check whether a `.env` file exists in the repository root first:
 
 ```bash
 ls -la .env
 ```
 
-- **If `.env` exists** (containing `LOOKERSDK_BASE_URL`, `LOOKERSDK_CLIENT_ID`, `LOOKERSDK_CLIENT_SECRET`), run `lkr-dev-cli` with `uv run --env-file=.env --with "lkr-dev-cli[code-mode]" lkr-dev-cli code-mode sandbox ...` (or `uvx --env-file=.env --from "lkr-dev-cli[codemode]" lkr-dev-cli code-mode sandbox ...`).
-- **If `.env` does not exist**, list configured OAuth accounts (`uv run --with "lkr-dev-cli[code-mode]" lkr-dev-cli auth list`) and pass `--oauth-account=<account>`.
+- If `.env` exists (containing `LOOKERSDK_BASE_URL`, `LOOKERSDK_CLIENT_ID`, `LOOKERSDK_CLIENT_SECRET`), run `lkr-dev-cli` with `uv run --env-file=.env --with "lkr-dev-cli[code-mode]" lkr-dev-cli code-mode sandbox ...` (or `uvx --env-file=.env --from "lkr-dev-cli[codemode]" lkr-dev-cli code-mode sandbox ...`).
+- If `.env` does not exist, list configured OAuth accounts (`uv run --with "lkr-dev-cli[code-mode]" lkr-dev-cli auth list`) and pass `--oauth-account=<account>`.
 
----
+## Remove the tour artifact with the bundled script
 
-## Step 2: Remove the Tour Artifact (Bundled Script)
-
-Use the bundled Monty sandbox script [scripts/reset_tour_artifact.py](./scripts/reset_tour_artifact.py), which automatically:
-1. Uses `--var user_id=<id>` if provided, or calls `me()["id"]` to look up the current authenticated user's ID.
+Use the bundled Monty sandbox script [scripts/reset_tour_artifact.py](./scripts/reset_tour_artifact.py), which performs three steps:
+1. Reads `--var user_id=<id>` if provided, or calls `me()["id"]` to look up the current authenticated user's ID.
 2. Checks both `"lookbase::lookbase"` and `"lookbase"` namespaces for `user_<id>_lookbase_prefs`.
-3. Deletes the entire artifact (or, if `--var guide_id=<uuid>` is passed, removes only that UUID from `dismissedGuideIds` while preserving saved metrics/POV) and returns a structured JSON summary.
+3. Deletes the entire artifact (or, if `--var guide_id=<uuid>` is passed, removes only that UUID from `dismissedGuideIds` while preserving saved metrics and POV) and returns a JSON summary.
 
-### A. Reset Current User's Tour Artifact (Looks up `me()["id"]`)
+### Reset the current user's tour artifact
 
 ```bash
 # Using .env file:
@@ -54,7 +48,7 @@ uv run --env-file=.env --with "lkr-dev-cli[code-mode]" lkr-dev-cli code-mode san
   --var guide_id=6f8a1c30-4e2b-4d9a-9c11-100000000001
 ```
 
-### B. Reset Another User's Tour Artifact (Optional `--var user_id=<id>`)
+### Reset another user's tour artifact
 
 Pass `--var user_id=<id>` (or `-v user_id=<id>`) to remove a specific user's artifact instead of the current user's:
 
@@ -65,9 +59,7 @@ uv run --env-file=.env --with "lkr-dev-cli[code-mode]" lkr-dev-cli code-mode san
   --var user_id=123
 ```
 
----
-
-## Step 3: Inline `--code` One-Liner (Alternative)
+## Inline --code alternative
 
 If you prefer running inline code without a script file:
 
@@ -105,11 +97,9 @@ return {"user_id": uid, "key": key, "deleted_from": deleted}
 '
 ```
 
----
+## Inspect existing LookBase artifacts before deleting
 
-## Optional: Inspect Existing LookBase Artifacts Before Deleting
-
-To list all stored user preference artifacts in the `"lookbase::lookbase"` namespace (for example, to find which `user_id`s currently have a dismissed tour artifact):
+To list all stored user preference artifacts in the `"lookbase::lookbase"` namespace (for example, to see which `user_id`s currently have a dismissed tour artifact):
 
 ```bash
 uv run --env-file=.env --with "lkr-dev-cli[code-mode]" lkr-dev-cli code-mode sandbox \
