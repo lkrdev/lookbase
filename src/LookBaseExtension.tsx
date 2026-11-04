@@ -39,6 +39,7 @@ import {
   formatMonthYearLabel,
   formatTimeframeLabel,
   formatTimeframeShortLabel,
+  getDefaultExpandedSecondaryIds,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
@@ -76,6 +77,7 @@ import {
   STARTER_HIERARCHY_CATALOG_NODES,
   STARTER_OUTLINE_QUERY_RESPONSE,
   toggleHierarchyNodeTriState,
+  toggleSecondaryHierarchyNode,
   validateLookBaseSettings,
   withSdkTimeout,
 } from "./essbaseEngine";
@@ -526,6 +528,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         .filter((d): d is LookBaseBreakdownDimensionDef => Boolean(d)),
     [availableBreakdownDimensions, activeBreakdownDimId],
   );
+  const [expandedSecondaryNodeIds, setExpandedSecondaryNodeIds] = useState<
+    Record<string, string[]>
+  >({});
 
   const availableGridMeasures = useMemo<LookBaseMeasureDef[]>(() => {
     if (Array.isArray(calcConfig.measures) && calcConfig.measures.length > 0) {
@@ -647,6 +652,10 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       totalDepth,
       undefined,
       activeBreakdownDims,
+      {
+        expandedPrimaryMemberIds: savedExpandedMemberIds,
+        expandedSecondaryIds: expandedSecondaryNodeIds,
+      },
     );
   }, [
     isParentChildMode,
@@ -656,6 +665,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     savedExpandedMemberIds,
     activeHierarchyDef,
     activeBreakdownDims,
+    expandedSecondaryNodeIds,
   ]);
 
   const effectiveQueryResponse: QueryResponse | undefined = useMemo(() => {
@@ -1072,6 +1082,13 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           .filter(Boolean)
           .map((id) => breakdownDefs.find((d) => d.id === id || d.fieldName === id)?.fieldName)
           .filter((f): f is string => Boolean(f));
+        if (
+          breakdownFields.includes("long_metrics.brand") &&
+          !breakdownFields.includes("long_metrics.brand_collection")
+        ) {
+          breakdownFields.push("long_metrics.brand_collection");
+        }
+        const queryLimit = breakdownFields.length > 0 ? "5000" : "500";
 
         const fields = [
           activePcConfig.memberIdField,
@@ -1107,7 +1124,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                   [activePcConfig.parentIdField]: firstChunk,
                 },
                 sorts: [activePcConfig.levelField, activePcConfig.labelField],
-                limit: "500",
+                limit: queryLimit,
               },
             }),
           ),
@@ -1142,7 +1159,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                         [activePcConfig.memberIdField]: explicitBrandsFilter,
                       },
                       sorts: [activePcConfig.levelField, activePcConfig.labelField],
-                      limit: "500",
+                      limit: queryLimit,
                     },
                   }),
                 )
@@ -1968,6 +1985,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     queryResponse: effectiveQueryResponse,
   });
 
+  const hasMultiHierarchy = (projectedOutline?.secondaryDimensions?.length || 0) > 0;
+
   const reportTableConfig = useMemo(
     () => ({
       ...LOOKBASE_DEFAULT_VIS_CONFIG,
@@ -1979,22 +1998,87 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       allowUserEdits: false,
       allowUserFilters: false,
       hasUserEdits: false,
-      subtotalDepth: (projectedOutline?.secondaryDimensions?.length || 0) > 0
-        ? String(projectedOutline?.primaryHierarchyDepth || 4)
-        : "(all)",
+      rowSubtotals: !hasMultiHierarchy,
+      indexColumn: !hasMultiHierarchy,
+      spanRows: hasMultiHierarchy ? false : effectiveVisConfig.spanRows,
+      subtotalDepth: "(all)",
       freezeColumns: 1 + (projectedOutline?.secondaryDimensions?.length || 0),
       expandSubtotals: expandedPaths.join(","),
       isExtension: true,
     }),
-    [effectiveVisConfig, expandedPaths, projectedOutline],
+    [effectiveVisConfig, expandedPaths, projectedOutline, hasMultiHierarchy],
   );
 
-  // Sync collapsed row visibility immediately after buildReportTable finishes so newly merged async child rows
-  // never leave collapsed branches visible
+  // Sync collapsed row visibility or decorate in-column Multi-Hierarchy cells immediately after buildReportTable finishes
   const syncCollapsedRowsDom = useCallback(() => {
     const el = gridWrapperRef.current;
     if (!el) return;
     const rows = Array.from(el.querySelectorAll("#reportTable tbody tr")) as HTMLElement[];
+    const multiMeta = projectedOutline?.multiHierarchyRowMeta;
+
+    if (multiMeta && multiMeta.length > 0) {
+      rows.forEach((tr, rowIdx) => {
+        const meta = multiMeta[rowIdx];
+        if (!meta) return;
+        tr.style.display = "";
+        tr.setAttribute("data-subtotal-path", meta.primaryNode.path);
+        tr.setAttribute("data-member-id", meta.primaryNode.memberId);
+
+        const dimCells = Array.from(tr.querySelectorAll("td.dimension")) as HTMLElement[];
+        const allCellMetas = [meta.primaryNode, ...meta.secondaryNodes];
+        allCellMetas.forEach((cellMeta, colIdx) => {
+          const td = dimCells[colIdx];
+          if (!td) return;
+          td.style.paddingLeft = `${8 + cellMeta.level * 16}px`;
+          td.style.fontWeight = cellMeta.isLeaf ? "400" : "600";
+          td.setAttribute("data-hierarchy-dim", cellMeta.dimId);
+          td.setAttribute("data-hierarchy-node-id", cellMeta.nodeId);
+
+          let toggleEl = td.querySelector(".lookbase-hier-toggle") as HTMLElement | null;
+          let spacerEl = td.querySelector(".lookbase-hier-spacer") as HTMLElement | null;
+          if (cellMeta.hasChildren && !cellMeta.isLeaf) {
+            if (spacerEl) spacerEl.remove();
+            if (!toggleEl) {
+              toggleEl = document.createElement("span");
+              toggleEl.className = "lookbase-hier-toggle";
+              toggleEl.style.display = "inline-block";
+              toggleEl.style.width = "20px";
+              toggleEl.style.cursor = "pointer";
+              toggleEl.style.fontFamily = "monospace";
+              toggleEl.style.fontWeight = "700";
+              toggleEl.style.color = "#1a73e8";
+              toggleEl.style.userSelect = "none";
+              td.insertBefore(toggleEl, td.firstChild);
+            }
+            toggleEl.setAttribute("data-hierarchy-dim", cellMeta.dimId);
+            toggleEl.setAttribute("data-hierarchy-node-id", cellMeta.nodeId);
+            toggleEl.textContent = cellMeta.isExpanded ? "[-] " : "[+] ";
+          } else {
+            if (toggleEl) toggleEl.remove();
+            if (!spacerEl) {
+              spacerEl = document.createElement("span");
+              spacerEl.className = "lookbase-hier-spacer";
+              spacerEl.style.display = "inline-block";
+              spacerEl.style.width = "20px";
+              td.insertBefore(spacerEl, td.firstChild);
+            }
+          }
+        });
+
+        const measureCells = Array.from(tr.querySelectorAll("td.measure")) as HTMLElement[];
+        for (const mTd of measureCells) {
+          if (mTd.textContent?.trim() === "#Missing") {
+            mTd.style.color = "#9aa0a6";
+            mTd.style.fontStyle = "italic";
+          } else {
+            mTd.style.color = "";
+            mTd.style.fontStyle = "";
+          }
+        }
+      });
+      return;
+    }
+
     const collapsedPaths = rows
       .filter((r) => r.classList.contains("subtotal") && r.classList.contains("collapsed"))
       .map((r) => r.getAttribute("data-subtotal-path") || "")
@@ -2010,7 +2094,11 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         );
       tr.style.display = isHidden ? "none" : "";
     }
-  }, []);
+  }, [projectedOutline]);
+
+  useEffect(() => {
+    syncCollapsedRowsDom();
+  }, [projectedOutline, syncCollapsedRowsDom]);
 
   // Intercept [+] / [-] subtotal expansion to fire live child query on unexpanded member_id
   // AND save the expanded member_ids to the Looker Artifacts API so all expanded branches load together on next load
@@ -2064,6 +2152,13 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                 .map((s) => s.trim())
                 .filter(Boolean);
               const isMultiTf = tfParts.length > 1;
+              const expandBreakdownFields = activeBreakdownDims.map((d) => d.fieldName);
+              if (
+                expandBreakdownFields.includes("long_metrics.brand") &&
+                !expandBreakdownFields.includes("long_metrics.brand_collection")
+              ) {
+                expandBreakdownFields.push("long_metrics.brand_collection");
+              }
               const restored = await restoreSavedOutlineExpansion(
                 core40SDK,
                 {
@@ -2076,7 +2171,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                     pcConfig.pathField,
                     pcConfig.levelField,
                     pcConfig.isLeafField,
-                    ...activeBreakdownDims.map((d) => d.fieldName),
+                    ...expandBreakdownFields,
                     ...(isMultiTf ? ["long_metrics.timeframe"] : []),
                     "long_metrics.current_period",
                     ...(selectedGridMeasureIdsRef.current.length > 0
@@ -2112,12 +2207,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               );
               if (restored.rows.length > 0) {
                 setOutlineRows((prev) =>
-                  mergeOutlineRows(
-                    prev,
-                    restored.rows,
-                    pcConfig,
-                    activeBreakdownDims.map((d) => d.fieldName),
-                  ),
+                  mergeOutlineRows(prev, restored.rows, pcConfig, expandBreakdownFields),
                 );
               }
               updateToast(toastId, {
@@ -2171,9 +2261,65 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       povSource,
       povYear,
       activeHierarchyId,
+      activeBreakdownDims,
       persistSavedExpansion,
       pushToast,
       updateToast,
+    ],
+  );
+
+  const handleToggleMultiHierarchyNode = useCallback(
+    async (dimId: string, nodeId: string) => {
+      if (!projectedOutline) return;
+      if (dimId === "__primary__") {
+        const pNode = projectedOutline.memberIdToNode?.[nodeId];
+        if (!pNode || pNode.isLeaf) return;
+        const isCurrentlyExpanded = savedExpandedMemberIds.includes(nodeId);
+        if (isCurrentlyExpanded) {
+          const nextIds = savedExpandedMemberIds.filter((id) => {
+            if (id === nodeId) return false;
+            const n = projectedOutline.memberIdToNode?.[id];
+            return !(n && n.path.startsWith(pNode.path + "|"));
+          });
+          const nextPaths = deriveExpandedPathsFromMemberIds(
+            nextIds,
+            projectedOutline.memberIdToNode,
+            expandedPaths,
+          );
+          setExpandedPaths(nextPaths);
+          persistSavedExpansion(nextIds, nextPaths);
+        } else {
+          const nextIds = Array.from(new Set(["ROOT", "ALL", ...savedExpandedMemberIds, nodeId]));
+          const nextPaths = deriveExpandedPathsFromMemberIds(
+            nextIds,
+            projectedOutline.memberIdToNode,
+            expandedPaths,
+          );
+          setExpandedPaths(nextPaths);
+          persistSavedExpansion(nextIds, nextPaths);
+          await handleLookBaseUpdateConfig({ expandSubtotals: nextPaths.join(",") });
+        }
+        return;
+      }
+
+      const dimDef = activeBreakdownDims.find((d) => d.id === dimId);
+      const tree = projectedOutline.secondaryTrees?.[dimId];
+      if (!dimDef || !tree) return;
+      setExpandedSecondaryNodeIds((prev) => {
+        const current = prev[dimId] ?? getDefaultExpandedSecondaryIds(dimDef, tree);
+        return {
+          ...prev,
+          [dimId]: toggleSecondaryHierarchyNode(tree, current, nodeId),
+        };
+      });
+    },
+    [
+      projectedOutline,
+      savedExpandedMemberIds,
+      expandedPaths,
+      persistSavedExpansion,
+      handleLookBaseUpdateConfig,
+      activeBreakdownDims,
     ],
   );
 
@@ -2181,6 +2327,17 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   const handleGridClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement;
+      const hierToggle = target.closest(".lookbase-hier-toggle") as HTMLElement | null;
+      if (hierToggle) {
+        const dimId = hierToggle.getAttribute("data-hierarchy-dim") || "";
+        const nodeId = hierToggle.getAttribute("data-hierarchy-node-id") || "";
+        if (dimId && nodeId) {
+          e.stopPropagation();
+          handleToggleMultiHierarchyNode(dimId, nodeId);
+          return;
+        }
+      }
+
       const td = target.closest("td") as HTMLTableCellElement | null;
       const tr = target.closest("tr") as HTMLTableRowElement | null;
       if (!td || !tr || !gridWrapperRef.current) return;
@@ -2255,19 +2412,32 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       pcConfig.memberIdField,
       activeHierarchyDef?.rootLabel,
       calcConfig.measures,
+      handleToggleMultiHierarchyNode,
     ],
   );
 
-  // Double-clicking a subtotal row toggles Zoom In / Zoom Out
-  const handleGridDoubleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    const tr = target.closest("tr.subtotal") as HTMLTableRowElement | null;
-    if (!tr) return;
-    const collapseIcon = tr.querySelector(".row-collapse-icon") as HTMLElement | null;
-    if (collapseIcon) {
-      collapseIcon.click();
-    }
-  }, []);
+  // Double-clicking a subtotal row or multi-hierarchy dimension cell toggles Zoom In / Zoom Out
+  const handleGridDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
+      const multiTd = target.closest("td[data-hierarchy-dim]") as HTMLElement | null;
+      if (multiTd) {
+        const dimId = multiTd.getAttribute("data-hierarchy-dim") || "";
+        const nodeId = multiTd.getAttribute("data-hierarchy-node-id") || "";
+        if (dimId && nodeId) {
+          handleToggleMultiHierarchyNode(dimId, nodeId);
+          return;
+        }
+      }
+      const tr = target.closest("tr.subtotal") as HTMLTableRowElement | null;
+      if (!tr) return;
+      const collapseIcon = tr.querySelector(".row-collapse-icon") as HTMLElement | null;
+      if (collapseIcon) {
+        collapseIcon.click();
+      }
+    },
+    [handleToggleMultiHierarchyNode],
+  );
 
   const handlePovChange = useCallback(
     (
