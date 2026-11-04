@@ -113,6 +113,13 @@ export interface LookBaseMeasureDef {
   description?: string;
 }
 
+export interface LookBaseBreakdownDimensionDef {
+  id: string;
+  label: string;
+  fieldName: string;
+  allLabel?: string;
+}
+
 export const BUILTIN_HIERARCHY_CATALOG: LookBaseHierarchyDef[] = [
   {
     id: "product",
@@ -528,6 +535,7 @@ export interface LookBaseUrlState {
   source?: string;
   year?: string;
   hierarchy?: string;
+  breakdown?: string;
   member?: string;
   expanded?: string[];
   metrics?: string[];
@@ -572,6 +580,7 @@ export interface CalculationsConfig {
   measure_pdt_views?: Record<string, string>;
   settings?: LookBaseSettingsConfig;
   hierarchies?: LookBaseHierarchyDef[];
+  breakdown_dimensions?: LookBaseBreakdownDimensionDef[];
   measures?: LookBaseMeasureDef[];
   starter_outline?: any;
   _isCustomProjectConfig?: boolean;
@@ -922,6 +931,9 @@ export function parseLookBaseUrlState(searchOrRoute: string | undefined | null):
   const hierarchy = params.get("hierarchy");
   if (hierarchy) state.hierarchy = hierarchy;
 
+  const breakdown = params.get("breakdown");
+  if (breakdown) state.breakdown = breakdown;
+
   const member = params.get("member");
   if (member) state.member = member;
 
@@ -976,6 +988,7 @@ export function serializeLookBaseUrlState(state: LookBaseUrlState): string {
   if (state.source) params.set("source", state.source);
   if (state.year) params.set("year", state.year);
   if (state.hierarchy) params.set("hierarchy", state.hierarchy);
+  if (state.breakdown) params.set("breakdown", state.breakdown);
   if (state.member) params.set("member", state.member);
   if (state.expanded && state.expanded.length > 0) {
     params.set("expanded", state.expanded.join(","));
@@ -1867,6 +1880,7 @@ const OBJECT_ARRAY_SECTIONS = new Set([
   "pinned_rows",
   "quick_start_actions",
   "hierarchies",
+  "breakdown_dimensions",
   "measures",
 ]);
 
@@ -2025,6 +2039,7 @@ function normalizeParsedProjectCalculations(
       measure_pdt_views: combined.measure_pdt_views || {},
       settings: combined.settings || DEFAULT_LOOKBASE_SETTINGS,
       hierarchies: combined.hierarchies || [],
+      breakdown_dimensions: combined.breakdown_dimensions || [],
       measures: combined.measures || [],
       starter_outline: combined.starter_outline,
       _isCustomProjectConfig: true,
@@ -2763,21 +2778,87 @@ export async function fetchFullHierarchyCatalog(
 }
 
 /**
- * Merges newly fetched child rows into existing outline rows, deduplicating by `member_id`.
+ * Returns the available secondary Row Breakdown dimensions (Column B in Essbase Smart View style).
+ */
+export function discoverBreakdownDimensions(
+  calcConfig?: CalculationsConfig | null,
+): LookBaseBreakdownDimensionDef[] {
+  if (
+    Array.isArray(calcConfig?.breakdown_dimensions) &&
+    calcConfig!.breakdown_dimensions!.length > 0
+  ) {
+    return calcConfig!.breakdown_dimensions!.map((d: any) => ({
+      id: d.id || d.fieldName || d.field,
+      label: d.label || d.id || d.fieldName || d.field,
+      fieldName: d.fieldName || d.field || d.id,
+      allLabel: d.allLabel || d.all_member_label || `All ${d.label || d.id}s`,
+    }));
+  }
+  if (isCustomCalculationsConfig(calcConfig)) {
+    return [
+      {
+        id: "brand",
+        label: "Brand",
+        fieldName: "long_metrics.brand",
+        allLabel: "All Brands",
+      },
+      {
+        id: "brand_collection",
+        label: "Brand Collection",
+        fieldName: "long_metrics.brand_collection",
+        allLabel: "All Collections",
+      },
+    ];
+  }
+  return [
+    {
+      id: "brand",
+      label: "Brand",
+      fieldName: "dim_products.brand",
+      allLabel: "All Brands",
+    },
+    {
+      id: "category",
+      label: "Category",
+      fieldName: "dim_products.category",
+      allLabel: "All Categories",
+    },
+    {
+      id: "department",
+      label: "Department",
+      fieldName: "dim_products.department",
+      allLabel: "All Departments",
+    },
+  ];
+}
+
+/**
+ * Merges newly fetched child rows into existing outline rows, deduplicating by `member_id`
+ * (and optional `secondaryDimField` when a 2nd Row Dimension like `Brand` is active).
  */
 export function mergeOutlineRows(
   existingRows: Record<string, any>[],
   newChildRows: Record<string, any>[],
   pcConfig: ParentChildHierarchyConfig,
+  secondaryDimField?: string,
 ): Record<string, any>[] {
   const byId = new Map<string, Record<string, any>>();
-  for (const r of existingRows) {
+  const makeKey = (r: Record<string, any>): string | null => {
     const id = r?.[pcConfig.memberIdField]?.value ?? r?.[pcConfig.memberIdField];
-    if (id != null) byId.set(String(id), r);
+    if (id == null) return null;
+    if (secondaryDimField) {
+      const secVal = r?.[secondaryDimField]?.value ?? r?.[secondaryDimField] ?? "";
+      return `${String(id)}||${String(secVal)}`;
+    }
+    return String(id);
+  };
+  for (const r of existingRows) {
+    const key = makeKey(r);
+    if (key != null) byId.set(key, r);
   }
   for (const r of newChildRows) {
-    const id = r?.[pcConfig.memberIdField]?.value ?? r?.[pcConfig.memberIdField];
-    if (id != null) byId.set(String(id), r);
+    const key = makeKey(r);
+    if (key != null) byId.set(key, r);
   }
   return Array.from(byId.values());
 }
@@ -2786,6 +2867,8 @@ export interface ProjectedOutlineResult {
   queryResponse: any;
   pathToNode: Record<string, OutlineNodeMeta>;
   memberIdToNode: Record<string, OutlineNodeMeta>;
+  primaryHierarchyDepth?: number;
+  secondaryDimension?: LookBaseBreakdownDimensionDef | null;
 }
 
 /**
@@ -2860,72 +2943,9 @@ export function projectOutlineRowsToReportTable(
   pcConfig: ParentChildHierarchyConfig,
   totalHierarchyDepth = 4,
   selectedMemberIds?: string[],
+  secondaryDim?: LookBaseBreakdownDimensionDef | null,
 ): ProjectedOutlineResult {
   const normalizedBase = normalizeQueryResponseFields(baseQueryResponse || {});
-  const allExtractedNodes: OutlineNodeMeta[] = [];
-  const pathToNode: Record<string, OutlineNodeMeta> = {};
-  const memberIdToNode: Record<string, OutlineNodeMeta> = {};
-
-  for (const row of outlineRows) {
-    const node = extractOutlineNode(row, pcConfig);
-    if (node) {
-      allExtractedNodes.push(node);
-      pathToNode[node.path] = node;
-      memberIdToNode[node.memberId] = node;
-    }
-  }
-
-  // If specific leaf nodes (e.g. `BRAND:Men|Jeans|Calvin Klein`) are selected for a category,
-  // filter that category's leaves to only the selected leaves while keeping categories with no explicit leaf filter intact.
-  const explicitLeafParentIds = new Set<string>();
-  const explicitLeafIds = new Set<string>();
-  if (Array.isArray(selectedMemberIds) && selectedMemberIds.length > 0) {
-    for (const id of selectedMemberIds) {
-      const matchingNode = memberIdToNode[id];
-      if (matchingNode?.isLeaf) {
-        explicitLeafIds.add(id);
-        explicitLeafParentIds.add(matchingNode.parentId);
-      } else if (id.startsWith("BRAND:")) {
-        explicitLeafIds.add(id);
-        const parts = id.slice("BRAND:".length).split("|");
-        if (parts.length >= 2) {
-          explicitLeafParentIds.add(`CAT:${parts[0]}|${parts[1]}`);
-        }
-      }
-    }
-  }
-
-  const nodes = sortOutlineNodesTreeOrder(allExtractedNodes).filter((n) => {
-    if (n.isLeaf && explicitLeafParentIds.has(n.parentId)) {
-      return explicitLeafIds.has(n.memberId);
-    }
-    return true;
-  });
-
-  const maxDepth = Math.max(
-    totalHierarchyDepth,
-    nodes.reduce((acc, n) => Math.max(acc, n.level + 1), 2),
-  );
-
-  const syntheticDims = Array.from({ length: maxDepth }, (_, idx) => ({
-    name: `__lookbase_lvl_${idx}`,
-    label: idx === 0 ? "Outline Member" : `Level ${idx}`,
-    short_label: idx === 0 ? "Outline Member" : `Level ${idx}`,
-    type: "string",
-    is_numeric: false,
-  }));
-
-  const subtotalsData: Record<string, any[]> = {};
-  const leafDataRows: Record<string, any>[] = [];
-  const parentPathsWithChildren = new Set<string>();
-
-  for (const node of nodes) {
-    const parts = node.path.split("|");
-    if (parts.length > 1) {
-      parentPathsWithChildren.add(parts.slice(0, -1).join("|"));
-    }
-  }
-
   const measureFields: any[] = Array.isArray(normalizedBase?.fields?.measure_like)
     ? normalizedBase.fields.measure_like
     : STARTER_OUTLINE_QUERY_RESPONSE.fields.measure_like;
@@ -2976,6 +2996,134 @@ export function projectOutlineRowsToReportTable(
     };
   });
 
+  const sumCells = (cells: any[], isRatio: boolean, fmt: string) => {
+    const nums = cells
+      .map((c) => (c !== null && typeof c === "object" && "value" in c ? c.value : c))
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    if (!nums.length) return undefined;
+    const val = nums.reduce((a, b) => a + b, 0) / (isRatio ? nums.length : 1);
+    return { value: val, rendered: formatEssbaseValue(val, fmt) };
+  };
+
+  const aggregateMemberRows = (rows: Record<string, any>[]): Record<string, any> => {
+    if (rows.length <= 1) return rows[0] || {};
+    const merged: Record<string, any> = JSON.parse(JSON.stringify(rows[0]));
+    for (const m of measureFields) {
+      const mName = m.name;
+      const fmt = m.value_format || (mName.includes("percentage") || mName.includes("pct") ? "0.0%" : "$#,##0");
+      const isRatio =
+        mName.includes("percentage") || mName.includes("pct") || mName.includes("ratio") || String(fmt).includes("%");
+      if (normalizedPivots.length > 0) {
+        if (!merged[mName]) merged[mName] = {};
+        for (const p of normalizedPivots) {
+          const agg = sumCells(rows.map((r) => r?.[mName]?.[p.key]), isRatio, fmt);
+          if (agg) merged[mName][p.key] = agg;
+        }
+      } else {
+        const agg = sumCells(rows.map((r) => r?.[mName]), isRatio, fmt);
+        if (agg) merged[mName] = agg;
+      }
+    }
+    return merged;
+  };
+
+  const rowsByMemberId = new Map<string, Record<string, any>[]>();
+  const firstNodeByMemberId = new Map<string, OutlineNodeMeta>();
+
+  for (const row of outlineRows) {
+    const node = extractOutlineNode(row, pcConfig);
+    if (node) {
+      if (!rowsByMemberId.has(node.memberId)) {
+        rowsByMemberId.set(node.memberId, []);
+        firstNodeByMemberId.set(node.memberId, node);
+      }
+      rowsByMemberId.get(node.memberId)!.push(row);
+    }
+  }
+
+  const allExtractedNodes: OutlineNodeMeta[] = [];
+  const pathToNode: Record<string, OutlineNodeMeta> = {};
+  const memberIdToNode: Record<string, OutlineNodeMeta> = {};
+
+  for (const [mId, baseNode] of firstNodeByMemberId.entries()) {
+    const memberRows = rowsByMemberId.get(mId) || [baseNode.rawRow];
+    const aggNode: OutlineNodeMeta = {
+      ...baseNode,
+      rawRow: memberRows.length > 1 ? aggregateMemberRows(memberRows) : baseNode.rawRow,
+    };
+    allExtractedNodes.push(aggNode);
+    pathToNode[aggNode.path] = aggNode;
+    memberIdToNode[aggNode.memberId] = aggNode;
+  }
+
+  // If specific leaf nodes (e.g. `BRAND:Men|Jeans|Calvin Klein`) are selected for a category,
+  // filter that category's leaves to only the selected leaves while keeping categories with no explicit leaf filter intact.
+  const explicitLeafParentIds = new Set<string>();
+  const explicitLeafIds = new Set<string>();
+  if (Array.isArray(selectedMemberIds) && selectedMemberIds.length > 0) {
+    for (const id of selectedMemberIds) {
+      const matchingNode = memberIdToNode[id];
+      if (matchingNode?.isLeaf) {
+        explicitLeafIds.add(id);
+        explicitLeafParentIds.add(matchingNode.parentId);
+      } else if (id.startsWith("BRAND:")) {
+        explicitLeafIds.add(id);
+        const parts = id.slice("BRAND:".length).split("|");
+        if (parts.length >= 2) {
+          explicitLeafParentIds.add(`CAT:${parts[0]}|${parts[1]}`);
+        }
+      }
+    }
+  }
+
+  const nodes = sortOutlineNodesTreeOrder(allExtractedNodes).filter((n) => {
+    if (n.isLeaf && explicitLeafParentIds.has(n.parentId)) {
+      return explicitLeafIds.has(n.memberId);
+    }
+    return true;
+  });
+
+  const maxDepth = Math.max(
+    totalHierarchyDepth,
+    nodes.reduce((acc, n) => Math.max(acc, n.level + 1), 2),
+  );
+
+  const primaryDims = Array.from({ length: maxDepth }, (_, idx) => ({
+    name: `__lookbase_lvl_${idx}`,
+    label: idx === 0 ? "Outline Member" : `Level ${idx}`,
+    short_label: idx === 0 ? "Outline Member" : `Level ${idx}`,
+    type: "string",
+    is_numeric: false,
+  }));
+
+  const hasSecondaryDim = Boolean(secondaryDim?.fieldName);
+  const syntheticDims = hasSecondaryDim
+    ? [
+        ...primaryDims,
+        {
+          name: secondaryDim!.fieldName,
+          label: secondaryDim!.label,
+          short_label: secondaryDim!.label,
+          type: "string",
+          is_numeric: false,
+        },
+      ]
+    : primaryDims;
+  const allBreakdownLabel = hasSecondaryDim
+    ? secondaryDim!.allLabel || `All ${secondaryDim!.label}s`
+    : "";
+
+  const subtotalsData: Record<string, any[]> = {};
+  const leafDataRows: Record<string, any>[] = [];
+  const parentPathsWithChildren = new Set<string>();
+
+  for (const node of nodes) {
+    const parts = node.path.split("|");
+    if (parts.length > 1) {
+      parentPathsWithChildren.add(parts.slice(0, -1).join("|"));
+    }
+  }
+
   const copyMeasures = (
     srcRow: Record<string, any>,
     targetRow: Record<string, any>,
@@ -3007,11 +3155,102 @@ export function projectOutlineRowsToReportTable(
     }
   };
 
+  const hasNonZeroMeasureActivity = (row: Record<string, any>): boolean =>
+    measureFields.some((m) => {
+      const cells = normalizedPivots.length
+        ? normalizedPivots.map((p) => row?.[m.name]?.[p.key])
+        : [row?.[m.name]];
+      return cells.some((c) => {
+        const v = c?.value ?? c;
+        return typeof v === "number" && Number.isFinite(v) && v !== 0;
+      });
+    });
+
+  const readSecondaryVal = (row: Record<string, any>, fallbackNode?: OutlineNodeMeta): string => {
+    if (!hasSecondaryDim) return "";
+    const fName = secondaryDim!.fieldName;
+    const suffix = fName.split(".").pop() || "";
+    const hit =
+      row?.[fName] ??
+      Object.entries(row || {}).find(([k]) => k === suffix || k.endsWith(`.${suffix}`))?.[1];
+    const raw = hit !== null && typeof hit === "object" && "value" in hit ? hit.value : hit;
+    return String(raw ?? "").trim() || (fallbackNode?.isLeaf ? fallbackNode.label : "");
+  };
+
   for (const node of nodes) {
     const parts = node.path.split("|");
     const depth = parts.length; // 1-based depth (1 = Root 'All Products', 2 = Dept 'Men', etc.)
 
-    if (!node.isLeaf && depth < maxDepth) {
+    if (hasSecondaryDim) {
+      const clampedDepth = Math.min(depth, maxDepth);
+      const depthKey = String(clampedDepth);
+      if (!subtotalsData[depthKey]) subtotalsData[depthKey] = [];
+      const grouping = primaryDims.slice(0, clampedDepth).map((d) => d.name);
+      const subRow: Record<string, any> = {
+        $$$__grouping__$$$: grouping,
+        _member_id: node.memberId,
+        _parent_id: node.parentId,
+      };
+      for (let i = 0; i < maxDepth; i++) {
+        subRow[`__lookbase_lvl_${i}`] = {
+          value: i < clampedDepth ? parts[i] : null,
+          rendered: i < clampedDepth ? parts[i] : "",
+        };
+      }
+      subRow[secondaryDim!.fieldName] = {
+        value: allBreakdownLabel,
+        rendered: allBreakdownLabel,
+      };
+      copyMeasures(node.rawRow, subRow, false);
+      subtotalsData[depthKey].push(subRow);
+
+      // Emit per-Brand breakdown rows for bottom visible / terminal branches (with #Missing zero-suppression)
+      if (!parentPathsWithChildren.has(node.path)) {
+        const candidateRows = rowsByMemberId.get(node.memberId) || [node.rawRow];
+        const byBrand = new Map<string, Record<string, any>[]>();
+        for (const r of candidateRows) {
+          const bVal = readSecondaryVal(r, node);
+          if (!bVal || !hasNonZeroMeasureActivity(r)) continue;
+          if (!byBrand.has(bVal)) byBrand.set(bVal, []);
+          byBrand.get(bVal)!.push(r);
+        }
+        if (byBrand.size > 0) {
+          const sortedBrands = Array.from(byBrand.entries()).sort((a, b) =>
+            a[0].localeCompare(b[0]),
+          );
+          for (const [bVal, bRows] of sortedBrands) {
+            const aggBrandRow = bRows.length > 1 ? aggregateMemberRows(bRows) : bRows[0];
+            const leafRow: Record<string, any> = {
+              _member_id: node.memberId,
+              _parent_id: node.parentId,
+              _breakdown_value: bVal,
+            };
+            for (let i = 0; i < maxDepth; i++) {
+              const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
+              leafRow[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
+            }
+            leafRow[secondaryDim!.fieldName] = { value: bVal, rendered: bVal };
+            copyMeasures(aggBrandRow, leafRow, false);
+            leafDataRows.push(leafRow);
+          }
+        } else {
+          const placeholderLeaf: Record<string, any> = {
+            _is_placeholder: true,
+            _parent_member_id: node.memberId,
+          };
+          for (let i = 0; i < maxDepth; i++) {
+            const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
+            placeholderLeaf[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
+          }
+          placeholderLeaf[secondaryDim!.fieldName] = {
+            value: allBreakdownLabel,
+            rendered: allBreakdownLabel,
+          };
+          copyMeasures(node.rawRow, placeholderLeaf, true);
+          leafDataRows.push(placeholderLeaf);
+        }
+      }
+    } else if (!node.isLeaf && depth < maxDepth) {
       const depthKey = String(depth);
       if (!subtotalsData[depthKey]) subtotalsData[depthKey] = [];
       const grouping = syntheticDims.slice(0, depth).map((d) => d.name);
@@ -3044,13 +3283,16 @@ export function projectOutlineRowsToReportTable(
         leafDataRows.push(placeholderLeaf);
       }
     } else {
-      // Leaf node at maxDepth
+      // Leaf node (including shallow ragged leaves at depth < maxDepth)
       const leafRow: Record<string, any> = {
         _member_id: node.memberId,
         _parent_id: node.parentId,
       };
       for (let i = 0; i < maxDepth; i++) {
-        const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
+        const val =
+          depth < maxDepth
+            ? parts[i < depth - 1 ? i : i < maxDepth - 1 ? Math.max(0, depth - 2) : depth - 1] ?? node.label
+            : parts[i] ?? parts[parts.length - 1] ?? node.label;
         leafRow[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
       }
       copyMeasures(node.rawRow, leafRow, false);
@@ -3084,6 +3326,8 @@ export function projectOutlineRowsToReportTable(
     queryResponse: projectedQueryResponse,
     pathToNode,
     memberIdToNode,
+    primaryHierarchyDepth: maxDepth,
+    secondaryDimension: hasSecondaryDim ? secondaryDim : null,
   };
 }
 

@@ -12,6 +12,26 @@
     "hierarchy_id_field": "dim_product_hierarchy.hierarchy_id",
     "outline_explore": "long_metrics"
   },
+  "breakdown_dimensions": [
+    {
+      "id": "brand",
+      "label": "Brand",
+      "fieldName": "dim_products.brand",
+      "allLabel": "All Brands"
+    },
+    {
+      "id": "category",
+      "label": "Category",
+      "fieldName": "dim_products.category",
+      "allLabel": "All Categories"
+    },
+    {
+      "id": "department",
+      "label": "Department",
+      "fieldName": "dim_products.department",
+      "allLabel": "All Departments"
+    }
+  ],
   "measure_pdt_views": {
     "Total Sale Price": "stacked_total_sale_price",
     "Total Gross Margin": "stacked_total_gross_margin"

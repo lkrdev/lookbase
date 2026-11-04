@@ -6,6 +6,7 @@ import {
   formatTimeframeShortLabel,
   isCustomCalculationsConfig,
   LOOKBASE_TIMEFRAME_OPTIONS,
+  LookBaseBreakdownDimensionDef,
   LookBaseHierarchyDef,
   LookBaseMeasureDef,
   LookBaseUrlState,
@@ -27,6 +28,9 @@ export interface LookBaseHeaderBarsProps {
   effectiveAvailableHierarchies: LookBaseHierarchyDef[];
   effectiveEnabledHierarchyIds: string[];
   handleSwitchHierarchy: (nextHierarchyId: string) => void;
+  availableBreakdownDimensions?: LookBaseBreakdownDimensionDef[];
+  activeBreakdownDimId?: string;
+  handleSwitchBreakdownDimension?: (nextBreakdownId: string) => void;
   isMeasuresDropdownOpen: boolean;
   setIsMeasuresDropdownOpen: React.Dispatch<React.SetStateAction<boolean>>;
   effectiveSelectedGridMeasureIds: string[];
@@ -93,6 +97,9 @@ export const LookBaseHeaderBars: React.FC<LookBaseHeaderBarsProps> = ({
   effectiveAvailableHierarchies,
   effectiveEnabledHierarchyIds,
   handleSwitchHierarchy,
+  availableBreakdownDimensions = [],
+  activeBreakdownDimId = "",
+  handleSwitchBreakdownDimension,
   isMeasuresDropdownOpen,
   setIsMeasuresDropdownOpen,
   effectiveSelectedGridMeasureIds,
@@ -209,6 +216,28 @@ export const LookBaseHeaderBars: React.FC<LookBaseHeaderBarsProps> = ({
                   </option>
                 ))}
             </select>
+            {availableBreakdownDimensions.length > 0 && (
+              <span
+                className="lookbase-pov-cell"
+                style={{ height: 22, padding: "0 4px" }}
+                title="Essbase 2nd Row Dimension (Column B Breakdown alongside ragged outline)"
+              >
+                <span style={{ fontSize: 10 }}>Col B:</span>
+                <select
+                  aria-label="Row Breakdown Dimension"
+                  data-testid="row-breakdown-select"
+                  value={activeBreakdownDimId}
+                  onChange={(e) => handleSwitchBreakdownDimension?.(e.target.value)}
+                >
+                  <option value="">None (Single Outline)</option>
+                  {availableBreakdownDimensions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            )}
           </span>
           <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
             <button
