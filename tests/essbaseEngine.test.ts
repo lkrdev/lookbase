@@ -1661,14 +1661,65 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       },
     ]);
 
-    // 5. URL state & breakdown_dimensions config round-trip
+    // 5. N-dimensional breakdown ([brand_collection, brand]) in Columns B & C
+    const collectionBreakdownDim = {
+      id: "brand_collection",
+      label: "Brand Collection",
+      fieldName: "long_metrics.brand_collection",
+      allLabel: "All Collections",
+    };
+    const multiDimRows = raggedBrandRows.map((r: any) => ({
+      ...r,
+      "long_metrics.brand_collection": {
+        value: r["long_metrics.brand"].value === "Holiday Inn" ? "Essentials" : "Luxury & Lifestyle",
+      },
+    }));
+    const projectedN = projectOutlineRowsToReportTable(
+      multiDimRows,
+      baseQueryResponse,
+      pcConfig,
+      4,
+      undefined,
+      [collectionBreakdownDim, brandBreakdownDim],
+    );
+    expect(projectedN.secondaryDimensions).toHaveLength(2);
+    const modelN = new VisPluginTableModel(
+      projectedN.queryResponse.data,
+      projectedN.queryResponse,
+      {
+        rowSubtotals: true,
+        subtotalStyle: "collapsed",
+        subtotalDepth: "4",
+        subtotalsOnTop: true,
+        startFolded: false,
+      },
+    );
+    const subRowsN = modelN.getDataRows().filter((r: any) => r.type === "subtotal");
+    for (const sr of subRowsN) {
+      expect(sr.data["long_metrics.brand_collection"]?.value).toBe("All Collections");
+      expect(sr.data["long_metrics.brand"]?.value).toBe("All Brands");
+    }
+    const lineItemsN = modelN.getDataRows().filter((r: any) => r.type === "line_item");
+    expect(
+      lineItemsN.map((r: any) => [
+        r.data["long_metrics.brand_collection"]?.value,
+        r.data["long_metrics.brand"]?.value,
+        r.data["long_metrics.total_sale_price"]?.value,
+      ]),
+    ).toEqual([
+      ["Essentials", "Holiday Inn", 130000],
+      ["Luxury & Lifestyle", "InterContinental", 250000],
+      ["Luxury & Lifestyle", "Six Senses", 120000],
+    ]);
+
+    // 6. URL state & breakdown_dimensions config round-trip
     const urlStr = serializeLookBaseUrlState({
       hierarchy: "total_ihg",
-      breakdown: "brand",
+      breakdown: "brand_collection,brand",
     });
     expect(parseLookBaseUrlState(urlStr)).toEqual({
       hierarchy: "total_ihg",
-      breakdown: "brand",
+      breakdown: "brand_collection,brand",
     });
     expect(discoverBreakdownDimensions(DEFAULT_CALCULATIONS_CONFIG).map((d) => d.id)).toEqual([
       "brand",

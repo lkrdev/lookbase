@@ -516,13 +516,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [calcConfig],
   );
 
-  const activeBreakdownDim = useMemo<LookBaseBreakdownDimensionDef | null>(
+  const activeBreakdownDims = useMemo<LookBaseBreakdownDimensionDef[]>(
     () =>
       activeBreakdownDimId
-        ? availableBreakdownDimensions.find(
-            (d) => d.id === activeBreakdownDimId || d.fieldName === activeBreakdownDimId,
-          ) || null
-        : null,
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+        .map((id) => availableBreakdownDimensions.find((d) => d.id === id || d.fieldName === id))
+        .filter((d): d is LookBaseBreakdownDimensionDef => Boolean(d)),
     [availableBreakdownDimensions, activeBreakdownDimId],
   );
 
@@ -645,7 +646,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       pcConfig,
       totalDepth,
       undefined,
-      activeBreakdownDim,
+      activeBreakdownDims,
     );
   }, [
     isParentChildMode,
@@ -654,7 +655,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     pcConfig,
     savedExpandedMemberIds,
     activeHierarchyDef,
-    activeBreakdownDim,
+    activeBreakdownDims,
   ]);
 
   const effectiveQueryResponse: QueryResponse | undefined = useMemo(() => {
@@ -1064,12 +1065,13 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           ? ["long_metrics.timeframe", "long_metrics.current_period"]
           : ["long_metrics.current_period"];
 
-        const currentBreakdownId = activeBreakdownDimIdRef.current;
-        const breakdownField = currentBreakdownId
-          ? discoverBreakdownDimensions(activeCfg).find(
-              (d) => d.id === currentBreakdownId || d.fieldName === currentBreakdownId,
-            )?.fieldName
-          : undefined;
+        const breakdownDefs = discoverBreakdownDimensions(activeCfg);
+        const breakdownFields = activeBreakdownDimIdRef.current
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean)
+          .map((id) => breakdownDefs.find((d) => d.id === id || d.fieldName === id)?.fieldName)
+          .filter((f): f is string => Boolean(f));
 
         const fields = [
           activePcConfig.memberIdField,
@@ -1078,7 +1080,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           activePcConfig.pathField,
           activePcConfig.levelField,
           activePcConfig.isLeafField,
-          ...(breakdownField ? [breakdownField] : []),
+          ...breakdownFields,
           ...(isMultiTimeframe ? ["long_metrics.timeframe"] : []),
           "long_metrics.current_period",
           ...gridMeasures,
@@ -1152,7 +1154,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         const primaryRows = Array.isArray((firstResp as any)?.data) ? (firstResp as any).data : [];
         let allMergedRows =
           restored.rows.length > 0
-            ? mergeOutlineRows(primaryRows, restored.rows, activePcConfig, breakdownField)
+            ? mergeOutlineRows(primaryRows, restored.rows, activePcConfig, breakdownFields)
             : primaryRows;
 
         if (rawExplicitBrandsResp) {
@@ -1165,7 +1167,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
               allMergedRows,
               brandRows,
               activePcConfig,
-              breakdownField,
+              breakdownFields,
             );
           }
         }
@@ -1977,10 +1979,10 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       allowUserEdits: false,
       allowUserFilters: false,
       hasUserEdits: false,
-      subtotalDepth: projectedOutline?.secondaryDimension
-        ? String(projectedOutline.primaryHierarchyDepth || 4)
+      subtotalDepth: (projectedOutline?.secondaryDimensions?.length || 0) > 0
+        ? String(projectedOutline?.primaryHierarchyDepth || 4)
         : "(all)",
-      freezeColumns: projectedOutline?.secondaryDimension ? 2 : 1,
+      freezeColumns: 1 + (projectedOutline?.secondaryDimensions?.length || 0),
       expandSubtotals: expandedPaths.join(","),
       isExtension: true,
     }),
@@ -2074,7 +2076,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                     pcConfig.pathField,
                     pcConfig.levelField,
                     pcConfig.isLeafField,
-                    ...(activeBreakdownDim?.fieldName ? [activeBreakdownDim.fieldName] : []),
+                    ...activeBreakdownDims.map((d) => d.fieldName),
                     ...(isMultiTf ? ["long_metrics.timeframe"] : []),
                     "long_metrics.current_period",
                     ...(selectedGridMeasureIdsRef.current.length > 0
@@ -2114,7 +2116,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                     prev,
                     restored.rows,
                     pcConfig,
-                    activeBreakdownDim?.fieldName,
+                    activeBreakdownDims.map((d) => d.fieldName),
                   ),
                 );
               }

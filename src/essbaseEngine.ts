@@ -2834,21 +2834,30 @@ export function discoverBreakdownDimensions(
 
 /**
  * Merges newly fetched child rows into existing outline rows, deduplicating by `member_id`
- * (and optional `secondaryDimField` when a 2nd Row Dimension like `Brand` is active).
+ * and any active secondary row breakdown dimension fields.
  */
 export function mergeOutlineRows(
   existingRows: Record<string, any>[],
   newChildRows: Record<string, any>[],
   pcConfig: ParentChildHierarchyConfig,
-  secondaryDimField?: string,
+  secondaryDimField?: string | string[],
 ): Record<string, any>[] {
   const byId = new Map<string, Record<string, any>>();
+  const secFields = (
+    Array.isArray(secondaryDimField)
+      ? secondaryDimField
+      : secondaryDimField
+        ? [secondaryDimField]
+        : []
+  ).filter(Boolean);
   const makeKey = (r: Record<string, any>): string | null => {
     const id = r?.[pcConfig.memberIdField]?.value ?? r?.[pcConfig.memberIdField];
     if (id == null) return null;
-    if (secondaryDimField) {
-      const secVal = r?.[secondaryDimField]?.value ?? r?.[secondaryDimField] ?? "";
-      return `${String(id)}||${String(secVal)}`;
+    if (secFields.length > 0) {
+      return [
+        String(id),
+        ...secFields.map((f) => String(r?.[f]?.value ?? r?.[f] ?? "")),
+      ].join("||");
     }
     return String(id);
   };
@@ -2869,6 +2878,7 @@ export interface ProjectedOutlineResult {
   memberIdToNode: Record<string, OutlineNodeMeta>;
   primaryHierarchyDepth?: number;
   secondaryDimension?: LookBaseBreakdownDimensionDef | null;
+  secondaryDimensions?: LookBaseBreakdownDimensionDef[];
 }
 
 /**
@@ -2943,7 +2953,7 @@ export function projectOutlineRowsToReportTable(
   pcConfig: ParentChildHierarchyConfig,
   totalHierarchyDepth = 4,
   selectedMemberIds?: string[],
-  secondaryDim?: LookBaseBreakdownDimensionDef | null,
+  secondaryDim?: LookBaseBreakdownDimensionDef | LookBaseBreakdownDimensionDef[] | null,
 ): ProjectedOutlineResult {
   const normalizedBase = normalizeQueryResponseFields(baseQueryResponse || {});
   const measureFields: any[] = Array.isArray(normalizedBase?.fields?.measure_like)
@@ -3096,22 +3106,22 @@ export function projectOutlineRowsToReportTable(
     is_numeric: false,
   }));
 
-  const hasSecondaryDim = Boolean(secondaryDim?.fieldName);
+  const secondaryDims = (
+    Array.isArray(secondaryDim) ? secondaryDim : secondaryDim ? [secondaryDim] : []
+  ).filter((d): d is LookBaseBreakdownDimensionDef => Boolean(d?.fieldName));
+  const hasSecondaryDim = secondaryDims.length > 0;
   const syntheticDims = hasSecondaryDim
     ? [
         ...primaryDims,
-        {
-          name: secondaryDim!.fieldName,
-          label: secondaryDim!.label,
-          short_label: secondaryDim!.label,
+        ...secondaryDims.map((d) => ({
+          name: d.fieldName,
+          label: d.label,
+          short_label: d.label,
           type: "string",
           is_numeric: false,
-        },
+        })),
       ]
     : primaryDims;
-  const allBreakdownLabel = hasSecondaryDim
-    ? secondaryDim!.allLabel || `All ${secondaryDim!.label}s`
-    : "";
 
   const subtotalsData: Record<string, any[]> = {};
   const leafDataRows: Record<string, any>[] = [];
@@ -3166,9 +3176,12 @@ export function projectOutlineRowsToReportTable(
       });
     });
 
-  const readSecondaryVal = (row: Record<string, any>, fallbackNode?: OutlineNodeMeta): string => {
-    if (!hasSecondaryDim) return "";
-    const fName = secondaryDim!.fieldName;
+  const readSecondaryVal = (
+    row: Record<string, any>,
+    dimDef: LookBaseBreakdownDimensionDef,
+    fallbackNode?: OutlineNodeMeta,
+  ): string => {
+    const fName = dimDef.fieldName;
     const suffix = fName.split(".").pop() || "";
     const hit =
       row?.[fName] ??
@@ -3197,40 +3210,43 @@ export function projectOutlineRowsToReportTable(
           rendered: i < clampedDepth ? parts[i] : "",
         };
       }
-      subRow[secondaryDim!.fieldName] = {
-        value: allBreakdownLabel,
-        rendered: allBreakdownLabel,
-      };
+      for (const d of secondaryDims) {
+        const allLbl = d.allLabel || `All ${d.label}s`;
+        subRow[d.fieldName] = { value: allLbl, rendered: allLbl };
+      }
       copyMeasures(node.rawRow, subRow, false);
       subtotalsData[depthKey].push(subRow);
 
-      // Emit per-Brand breakdown rows for bottom visible / terminal branches (with #Missing zero-suppression)
+      // Emit N-dimensional breakdown rows for bottom visible / terminal branches (with #Missing zero-suppression)
       if (!parentPathsWithChildren.has(node.path)) {
         const candidateRows = rowsByMemberId.get(node.memberId) || [node.rawRow];
-        const byBrand = new Map<string, Record<string, any>[]>();
+        const byTuple = new Map<string, { vals: string[]; rows: Record<string, any>[] }>();
         for (const r of candidateRows) {
-          const bVal = readSecondaryVal(r, node);
-          if (!bVal || !hasNonZeroMeasureActivity(r)) continue;
-          if (!byBrand.has(bVal)) byBrand.set(bVal, []);
-          byBrand.get(bVal)!.push(r);
+          const vals = secondaryDims.map((d) => readSecondaryVal(r, d, node));
+          if (vals.some((v) => !v) || !hasNonZeroMeasureActivity(r)) continue;
+          const tupleKey = vals.join("||");
+          if (!byTuple.has(tupleKey)) byTuple.set(tupleKey, { vals, rows: [] });
+          byTuple.get(tupleKey)!.rows.push(r);
         }
-        if (byBrand.size > 0) {
-          const sortedBrands = Array.from(byBrand.entries()).sort((a, b) =>
+        if (byTuple.size > 0) {
+          const sortedTuples = Array.from(byTuple.entries()).sort((a, b) =>
             a[0].localeCompare(b[0]),
           );
-          for (const [bVal, bRows] of sortedBrands) {
-            const aggBrandRow = bRows.length > 1 ? aggregateMemberRows(bRows) : bRows[0];
+          for (const [tupleKey, { vals, rows: tRows }] of sortedTuples) {
+            const aggRow = tRows.length > 1 ? aggregateMemberRows(tRows) : tRows[0];
             const leafRow: Record<string, any> = {
               _member_id: node.memberId,
               _parent_id: node.parentId,
-              _breakdown_value: bVal,
+              _breakdown_value: tupleKey,
             };
             for (let i = 0; i < maxDepth; i++) {
               const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
               leafRow[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
             }
-            leafRow[secondaryDim!.fieldName] = { value: bVal, rendered: bVal };
-            copyMeasures(aggBrandRow, leafRow, false);
+            secondaryDims.forEach((d, idx) => {
+              leafRow[d.fieldName] = { value: vals[idx], rendered: vals[idx] };
+            });
+            copyMeasures(aggRow, leafRow, false);
             leafDataRows.push(leafRow);
           }
         } else {
@@ -3242,10 +3258,10 @@ export function projectOutlineRowsToReportTable(
             const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
             placeholderLeaf[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
           }
-          placeholderLeaf[secondaryDim!.fieldName] = {
-            value: allBreakdownLabel,
-            rendered: allBreakdownLabel,
-          };
+          for (const d of secondaryDims) {
+            const allLbl = d.allLabel || `All ${d.label}s`;
+            placeholderLeaf[d.fieldName] = { value: allLbl, rendered: allLbl };
+          }
           copyMeasures(node.rawRow, placeholderLeaf, true);
           leafDataRows.push(placeholderLeaf);
         }
@@ -3327,7 +3343,8 @@ export function projectOutlineRowsToReportTable(
     pathToNode,
     memberIdToNode,
     primaryHierarchyDepth: maxDepth,
-    secondaryDimension: hasSecondaryDim ? secondaryDim : null,
+    secondaryDimension: secondaryDims[0] || null,
+    secondaryDimensions: secondaryDims,
   };
 }
 
