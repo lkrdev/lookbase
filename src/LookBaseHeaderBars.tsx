@@ -6,6 +6,7 @@ import {
   formatTimeframeShortLabel,
   isCustomCalculationsConfig,
   LOOKBASE_TIMEFRAME_OPTIONS,
+  LookBaseBreakdownDimensionDef,
   LookBaseHierarchyDef,
   LookBaseMeasureDef,
   LookBaseUrlState,
@@ -27,6 +28,9 @@ export interface LookBaseHeaderBarsProps {
   effectiveAvailableHierarchies: LookBaseHierarchyDef[];
   effectiveEnabledHierarchyIds: string[];
   handleSwitchHierarchy: (nextHierarchyId: string) => void;
+  availableBreakdownDimensions?: LookBaseBreakdownDimensionDef[];
+  activeBreakdownDimId?: string;
+  handleSwitchBreakdownDimension?: (nextBreakdownId: string) => void;
   isMeasuresDropdownOpen: boolean;
   setIsMeasuresDropdownOpen: React.Dispatch<React.SetStateAction<boolean>>;
   effectiveSelectedGridMeasureIds: string[];
@@ -93,6 +97,9 @@ export const LookBaseHeaderBars: React.FC<LookBaseHeaderBarsProps> = ({
   effectiveAvailableHierarchies,
   effectiveEnabledHierarchyIds,
   handleSwitchHierarchy,
+  availableBreakdownDimensions = [],
+  activeBreakdownDimId = "",
+  handleSwitchBreakdownDimension,
   isMeasuresDropdownOpen,
   setIsMeasuresDropdownOpen,
   effectiveSelectedGridMeasureIds,
@@ -146,6 +153,20 @@ export const LookBaseHeaderBars: React.FC<LookBaseHeaderBarsProps> = ({
       nextList,
     );
   };
+
+  const committedBreakdownIds = React.useMemo(
+    () =>
+      activeBreakdownDimId
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [activeBreakdownDimId],
+  );
+  const [isDimensionsDropdownOpen, setIsDimensionsDropdownOpen] = React.useState(false);
+  const [draftBreakdownIds, setDraftBreakdownIds] = React.useState<string[]>(committedBreakdownIds);
+  React.useEffect(() => {
+    setDraftBreakdownIds(committedBreakdownIds);
+  }, [committedBreakdownIds]);
 
   return (
     <>
@@ -210,6 +231,115 @@ export const LookBaseHeaderBars: React.FC<LookBaseHeaderBarsProps> = ({
                 ))}
             </select>
           </span>
+          {availableBreakdownDimensions.length > 0 && (
+            <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+              <button
+                type="button"
+                data-testid="row-breakdown-multiselect-btn"
+                className={`lookbase-btn ${isDimensionsDropdownOpen || committedBreakdownIds.length > 0 ? "active-toggle" : ""}`}
+                onClick={() =>
+                  setIsDimensionsDropdownOpen((open) => {
+                    if (!open) setDraftBreakdownIds(committedBreakdownIds);
+                    return !open;
+                  })
+                }
+                title="Select breakdown dimensions to display alongside the primary outline tree"
+              >
+                Dimensions ({committedBreakdownIds.length} Selected) ▾
+              </button>
+              {isDimensionsDropdownOpen && (
+                <div
+                  data-testid="row-breakdown-dropdown"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    position: "absolute",
+                    top: "calc(100% + 4px)",
+                    left: 0,
+                    width: 280,
+                    background: "#ffffff",
+                    border: "1px solid #94a3b8",
+                    borderRadius: 4,
+                    boxShadow: "0 8px 20px rgba(15, 23, 42, 0.18)",
+                    zIndex: 360,
+                    padding: 8,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      borderBottom: "1px solid #e2e8f0",
+                      paddingBottom: 6,
+                      marginBottom: 6,
+                    }}
+                  >
+                    <strong style={{ fontSize: 11, color: "#0f172a" }}>
+                      Dimensions ({draftBreakdownIds.length} of {availableBreakdownDimensions.length})
+                    </strong>
+                    <div style={{ display: "inline-flex", gap: 4 }}>
+                      <button
+                        type="button"
+                        data-testid="row-breakdown-clear-btn"
+                        className="lookbase-btn"
+                        style={{ height: 18, fontSize: 10, padding: "0 5px" }}
+                        onClick={() => setDraftBreakdownIds([])}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="row-breakdown-save-btn"
+                        className="lookbase-btn primary"
+                        style={{ height: 18, fontSize: 10, padding: "0 8px" }}
+                        onClick={() => {
+                          setIsDimensionsDropdownOpen(false);
+                          handleSwitchBreakdownDimension?.(draftBreakdownIds.join(","));
+                        }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    {availableBreakdownDimensions.map((d) => {
+                      const isChecked = draftBreakdownIds.includes(d.id);
+                      return (
+                        <label
+                          key={d.id}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            padding: "4px 6px",
+                            borderRadius: 3,
+                            fontSize: 11,
+                            cursor: "pointer",
+                            background: isChecked ? "#eff6ff" : "transparent",
+                            color: "#0f172a",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            data-testid={`row-breakdown-checkbox-${d.id}`}
+                            checked={isChecked}
+                            onChange={() =>
+                              setDraftBreakdownIds((prev) =>
+                                prev.includes(d.id)
+                                  ? prev.filter((id) => id !== d.id)
+                                  : [...prev, d.id],
+                              )
+                            }
+                          />
+                          <span style={{ fontWeight: isChecked ? 600 : 400 }}>{d.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </span>
+          )}
           <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
             <button
               type="button"

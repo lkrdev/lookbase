@@ -25,6 +25,7 @@ import {
   DEFAULT_QUICK_START_ACTIONS,
   deriveExpandedPathsFromMemberIds,
   discoverBIEngineCandidateTables,
+  discoverBreakdownDimensions,
   discoverFieldsFromExplore,
   discoverHierarchiesFromExplore,
   escapeLookerFilterValue,
@@ -50,6 +51,7 @@ import {
   loadProjectCalculations,
   LOOKBASE_SHARED_PDT_CATALOG,
   LOOKBASE_TIMEFRAME_OPTIONS,
+  LookBaseBreakdownDimensionDef,
   LookBaseCurrentUser,
   LookBaseHierarchyDef,
   LookBaseMeasureDef,
@@ -294,6 +296,11 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       BUILTIN_HIERARCHY_CATALOG[0]?.id ||
       "product",
   );
+  const [activeBreakdownDimId, setActiveBreakdownDimId] = useState<string>(
+    initialUrlState.breakdown || "",
+  );
+  const activeBreakdownDimIdRef = useRef<string>(activeBreakdownDimId);
+  activeBreakdownDimIdRef.current = activeBreakdownDimId;
   const [exploreHierarchyToAdd, setExploreHierarchyToAdd] = useState<string>(
     BUILTIN_HIERARCHY_CATALOG[1]?.id || "department",
   );
@@ -504,6 +511,22 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [effectiveAvailableHierarchies, effectiveActiveHierarchyId],
   );
 
+  const availableBreakdownDimensions = useMemo<LookBaseBreakdownDimensionDef[]>(
+    () => discoverBreakdownDimensions(calcConfig),
+    [calcConfig],
+  );
+
+  const activeBreakdownDims = useMemo<LookBaseBreakdownDimensionDef[]>(
+    () =>
+      activeBreakdownDimId
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+        .map((id) => availableBreakdownDimensions.find((d) => d.id === id || d.fieldName === id))
+        .filter((d): d is LookBaseBreakdownDimensionDef => Boolean(d)),
+    [availableBreakdownDimensions, activeBreakdownDimId],
+  );
+
   const availableGridMeasures = useMemo<LookBaseMeasureDef[]>(() => {
     if (Array.isArray(calcConfig.measures) && calcConfig.measures.length > 0) {
       return calcConfig.measures;
@@ -622,6 +645,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       rawQueryResponse,
       pcConfig,
       totalDepth,
+      undefined,
+      activeBreakdownDims,
     );
   }, [
     isParentChildMode,
@@ -630,6 +655,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     pcConfig,
     savedExpandedMemberIds,
     activeHierarchyDef,
+    activeBreakdownDims,
   ]);
 
   const effectiveQueryResponse: QueryResponse | undefined = useMemo(() => {
@@ -749,6 +775,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       source: povSource,
       year: povYear,
       hierarchy: activeHierarchyId !== defaultHierarchyId ? activeHierarchyId : undefined,
+      breakdown: activeBreakdownDimId || undefined,
       member: selectedOutlineMemberId,
       metrics: leftMetricRows.map((r) => r.id),
       pane: showLeftMetricsPane,
@@ -778,6 +805,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     povSource,
     povYear,
     activeHierarchyId,
+    activeBreakdownDimId,
     selectedOutlineMemberId,
     savedExpandedMemberIds,
     leftMetricRows,
@@ -1037,6 +1065,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           ? ["long_metrics.timeframe", "long_metrics.current_period"]
           : ["long_metrics.current_period"];
 
+        const breakdownDefs = discoverBreakdownDimensions(activeCfg);
+        const breakdownFields = activeBreakdownDimIdRef.current
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean)
+          .map((id) => breakdownDefs.find((d) => d.id === id || d.fieldName === id)?.fieldName)
+          .filter((f): f is string => Boolean(f));
+
         const fields = [
           activePcConfig.memberIdField,
           activePcConfig.parentIdField,
@@ -1044,6 +1080,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           activePcConfig.pathField,
           activePcConfig.levelField,
           activePcConfig.isLeafField,
+          ...breakdownFields,
           ...(isMultiTimeframe ? ["long_metrics.timeframe"] : []),
           "long_metrics.current_period",
           ...gridMeasures,
@@ -1117,7 +1154,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         const primaryRows = Array.isArray((firstResp as any)?.data) ? (firstResp as any).data : [];
         let allMergedRows =
           restored.rows.length > 0
-            ? mergeOutlineRows(primaryRows, restored.rows, activePcConfig)
+            ? mergeOutlineRows(primaryRows, restored.rows, activePcConfig, breakdownFields)
             : primaryRows;
 
         if (rawExplicitBrandsResp) {
@@ -1126,7 +1163,12 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
             ? (parsedBrandsResp as any).data
             : [];
           if (brandRows.length > 0) {
-            allMergedRows = mergeOutlineRows(allMergedRows, brandRows, activePcConfig);
+            allMergedRows = mergeOutlineRows(
+              allMergedRows,
+              brandRows,
+              activePcConfig,
+              breakdownFields,
+            );
           }
         }
 
@@ -1240,6 +1282,34 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     ],
   );
 
+  const handleSwitchBreakdownDimension = useCallback(
+    async (nextBreakdownId: string) => {
+      activeBreakdownDimIdRef.current = nextBreakdownId;
+      setActiveBreakdownDimId(nextBreakdownId);
+      if (core40SDK) {
+        await loadStandaloneOutline(
+          povVersion,
+          povTimeframe,
+          povSource,
+          povYear,
+          savedExpandedMemberIds,
+          activeHierarchyId,
+          calcConfigRef.current,
+        );
+      }
+    },
+    [
+      core40SDK,
+      loadStandaloneOutline,
+      povVersion,
+      povTimeframe,
+      povSource,
+      povYear,
+      savedExpandedMemberIds,
+      activeHierarchyId,
+    ],
+  );
+
   // Unified deterministic URL state applier (used by URL query params AND Quick-Start Action pills)
   const applyUrlState = useCallback(
     (urlPatch: LookBaseUrlState, triggerLiveSync = true) => {
@@ -1256,6 +1326,10 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       if (urlPatch.hierarchy !== undefined && urlPatch.hierarchy !== activeHierarchyId) {
         handleSwitchHierarchy(urlPatch.hierarchy);
         return;
+      }
+      if (urlPatch.breakdown !== undefined && urlPatch.breakdown !== activeBreakdownDimId) {
+        activeBreakdownDimIdRef.current = urlPatch.breakdown;
+        setActiveBreakdownDimId(urlPatch.breakdown);
       }
 
       if (urlPatch.pane !== undefined) {
@@ -1318,7 +1392,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           urlPatch.timeframe !== undefined ||
           urlPatch.source !== undefined ||
           urlPatch.year !== undefined ||
-          urlPatch.expanded !== undefined)
+          urlPatch.expanded !== undefined ||
+          urlPatch.breakdown !== undefined)
       ) {
         loadStandaloneOutline(
           nextVersion,
@@ -1336,6 +1411,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       povSource,
       povYear,
       activeHierarchyId,
+      activeBreakdownDimId,
       handleSwitchHierarchy,
       projectedOutline,
       pcConfig.memberIdField,
@@ -1903,10 +1979,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       allowUserEdits: false,
       allowUserFilters: false,
       hasUserEdits: false,
+      subtotalDepth: (projectedOutline?.secondaryDimensions?.length || 0) > 0
+        ? String(projectedOutline?.primaryHierarchyDepth || 4)
+        : "(all)",
+      freezeColumns: 1 + (projectedOutline?.secondaryDimensions?.length || 0),
       expandSubtotals: expandedPaths.join(","),
       isExtension: true,
     }),
-    [effectiveVisConfig, expandedPaths],
+    [effectiveVisConfig, expandedPaths, projectedOutline],
   );
 
   // Sync collapsed row visibility immediately after buildReportTable finishes so newly merged async child rows
@@ -1996,6 +2076,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                     pcConfig.pathField,
                     pcConfig.levelField,
                     pcConfig.isLeafField,
+                    ...activeBreakdownDims.map((d) => d.fieldName),
                     ...(isMultiTf ? ["long_metrics.timeframe"] : []),
                     "long_metrics.current_period",
                     ...(selectedGridMeasureIdsRef.current.length > 0
@@ -2030,7 +2111,14 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
                 20,
               );
               if (restored.rows.length > 0) {
-                setOutlineRows((prev) => mergeOutlineRows(prev, restored.rows, pcConfig));
+                setOutlineRows((prev) =>
+                  mergeOutlineRows(
+                    prev,
+                    restored.rows,
+                    pcConfig,
+                    activeBreakdownDims.map((d) => d.fieldName),
+                  ),
+                );
               }
               updateToast(toastId, {
                 message: `Expanded ${labelList}.`,
@@ -2549,6 +2637,9 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         effectiveAvailableHierarchies={effectiveAvailableHierarchies}
         effectiveEnabledHierarchyIds={effectiveEnabledHierarchyIds}
         handleSwitchHierarchy={handleSwitchHierarchy}
+        availableBreakdownDimensions={availableBreakdownDimensions}
+        activeBreakdownDimId={activeBreakdownDimId}
+        handleSwitchBreakdownDimension={handleSwitchBreakdownDimension}
         isMeasuresDropdownOpen={isMeasuresDropdownOpen}
         setIsMeasuresDropdownOpen={setIsMeasuresDropdownOpen}
         effectiveSelectedGridMeasureIds={effectiveSelectedGridMeasureIds}

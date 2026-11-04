@@ -13,6 +13,7 @@ import {
   DEFAULT_QUICK_START_ACTIONS,
   deriveExpandedPathsFromMemberIds,
   discoverBIEngineCandidateTables,
+  discoverBreakdownDimensions,
   discoverFieldsFromExplore,
   discoverHierarchiesFromExplore,
   escapeLookerFilterValue,
@@ -1463,6 +1464,267 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
           "MEMBER('Constant USD Amount (Operator-Weighted P&L)') / NULLIF(MEMBER('Gross Constant USD Amount (Unweighted)'), 0)",
         format: "0.0%",
       },
+    ]);
+  });
+
+  test("projects ragged primary hierarchy + 2nd Row Dimension (Brand in Column B) in Essbase Smart View style without duplicate ragged subtotals", () => {
+    const brandBreakdownDim = {
+      id: "brand",
+      label: "Brand",
+      fieldName: "long_metrics.brand",
+      allLabel: "All Brands",
+    };
+
+    // Ragged hierarchy:
+    // - L0: Total IHG (ALL)
+    //   - L1: Six senses Total (DEPT:Six senses Total) -> RAGGED SHALLOW TERMINAL LEAF at L1!
+    //   - L1: AMER Operations (DEPT:AMER Operations) -> deeper branch
+    //     - L2: Managed Ops (CAT:AMER|Managed) -> deeper branch at L2
+    const raggedBrandRows = [
+      // Root ALL across 2 brands
+      {
+        "dim_product_hierarchy.member_id": { value: "ALL" },
+        "dim_product_hierarchy.parent_id": { value: "ROOT" },
+        "dim_product_hierarchy.member_label": { value: "Total IHG" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG" },
+        "dim_product_hierarchy.level_num": { value: 0 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "Six Senses" },
+        "long_metrics.total_sale_price": { value: 120000, rendered: "$120,000" },
+        "long_metrics.total_gross_margin": { value: 40000, rendered: "$40,000" },
+      },
+      {
+        "dim_product_hierarchy.member_id": { value: "ALL" },
+        "dim_product_hierarchy.parent_id": { value: "ROOT" },
+        "dim_product_hierarchy.member_label": { value: "Total IHG" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG" },
+        "dim_product_hierarchy.level_num": { value: 0 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "InterContinental" },
+        "long_metrics.total_sale_price": { value: 380000, rendered: "$380,000" },
+        "long_metrics.total_gross_margin": { value: 160000, rendered: "$160,000" },
+      },
+      // Ragged shallow terminal leaf at L1: Six senses Total (only has "Six Senses" brand; "InterContinental" is 0/#Missing)
+      {
+        "dim_product_hierarchy.member_id": { value: "DEPT:Six senses Total" },
+        "dim_product_hierarchy.parent_id": { value: "ALL" },
+        "dim_product_hierarchy.member_label": { value: "Six senses Total" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG|Six senses Total" },
+        "dim_product_hierarchy.level_num": { value: 1 },
+        "dim_product_hierarchy.is_leaf": { value: "Yes" },
+        "long_metrics.brand": { value: "Six Senses" },
+        "long_metrics.total_sale_price": { value: 120000, rendered: "$120,000" },
+        "long_metrics.total_gross_margin": { value: 40000, rendered: "$40,000" },
+      },
+      {
+        "dim_product_hierarchy.member_id": { value: "DEPT:Six senses Total" },
+        "dim_product_hierarchy.parent_id": { value: "ALL" },
+        "dim_product_hierarchy.member_label": { value: "Six senses Total" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG|Six senses Total" },
+        "dim_product_hierarchy.level_num": { value: 1 },
+        "dim_product_hierarchy.is_leaf": { value: "Yes" },
+        "long_metrics.brand": { value: "ZeroBrand" },
+        "long_metrics.total_sale_price": { value: 0, rendered: "$0" },
+        "long_metrics.total_gross_margin": { value: 0, rendered: "$0" },
+      },
+      // Deeper branch L1: AMER Operations
+      {
+        "dim_product_hierarchy.member_id": { value: "DEPT:AMER Operations" },
+        "dim_product_hierarchy.parent_id": { value: "ALL" },
+        "dim_product_hierarchy.member_label": { value: "AMER Operations" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG|AMER Operations" },
+        "dim_product_hierarchy.level_num": { value: 1 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "InterContinental" },
+        "long_metrics.total_sale_price": { value: 380000, rendered: "$380,000" },
+        "long_metrics.total_gross_margin": { value: 160000, rendered: "$160,000" },
+      },
+      // Deeper branch L2 under AMER Operations: Managed Ops (2 brands)
+      {
+        "dim_product_hierarchy.member_id": { value: "CAT:AMER|Managed" },
+        "dim_product_hierarchy.parent_id": { value: "DEPT:AMER Operations" },
+        "dim_product_hierarchy.member_label": { value: "Managed Ops" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG|AMER Operations|Managed Ops" },
+        "dim_product_hierarchy.level_num": { value: 2 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "InterContinental" },
+        "long_metrics.total_sale_price": { value: 250000, rendered: "$250,000" },
+        "long_metrics.total_gross_margin": { value: 110000, rendered: "$110,000" },
+      },
+      {
+        "dim_product_hierarchy.member_id": { value: "CAT:AMER|Managed" },
+        "dim_product_hierarchy.parent_id": { value: "DEPT:AMER Operations" },
+        "dim_product_hierarchy.member_label": { value: "Managed Ops" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG|AMER Operations|Managed Ops" },
+        "dim_product_hierarchy.level_num": { value: 2 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "Holiday Inn" },
+        "long_metrics.total_sale_price": { value: 130000, rendered: "$130,000" },
+        "long_metrics.total_gross_margin": { value: 50000, rendered: "$50,000" },
+      },
+    ];
+
+    // Verify mergeOutlineRows preserves composite (member_id, brand) keys
+    const merged = mergeOutlineRows(
+      raggedBrandRows.slice(0, 2),
+      raggedBrandRows.slice(2),
+      pcConfig,
+      brandBreakdownDim.fieldName,
+    );
+    expect(merged).toHaveLength(raggedBrandRows.length);
+
+    const projected = projectOutlineRowsToReportTable(
+      merged,
+      baseQueryResponse,
+      pcConfig,
+      4,
+      undefined,
+      brandBreakdownDim,
+    );
+
+    // 1. Multi-brand rows per memberId are rolled up accurately in memberIdToNode
+    expect(projected.memberIdToNode["ALL"].rawRow["long_metrics.total_sale_price"].value).toBe(
+      500000,
+    );
+    expect(
+      projected.memberIdToNode["CAT:AMER|Managed"].rawRow["long_metrics.total_sale_price"].value,
+    ).toBe(380000);
+
+    // 2. Build VisPluginTableModel with subtotalDepth = String(maxLevels) ('4') when secondaryDim is active
+    const model = new VisPluginTableModel(
+      projected.queryResponse.data,
+      projected.queryResponse,
+      {
+        rowSubtotals: true,
+        subtotalStyle: "collapsed",
+        subtotalDepth: "4",
+        subtotalsOnTop: true,
+        startFolded: false,
+      },
+    );
+
+    // Column A (__lookbase_lvl_0) and Column B (long_metrics.brand) are both visible, while __lookbase_lvl_1..3 are hidden
+    const visibleDimCols = model.columns.filter(
+      (c: any) => c.id.startsWith("__lookbase_lvl_") || c.id === "long_metrics.brand",
+    );
+    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_0")?.hide).toBe(false);
+    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_1")?.hide).toBe(true);
+    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_2")?.hide).toBe(true);
+    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_3")?.hide).toBe(true);
+    expect(visibleDimCols.find((c: any) => c.id === "long_metrics.brand")?.hide).toBe(false);
+
+    // 3. Check generated subtotal rows:
+    // - No duplicate intermediate ragged subtotals for "Six senses Total" at depth 3 or 4!
+    const allRows = model.getDataRows();
+    const subtotalRows = allRows.filter((r: any) => r.type === "subtotal");
+    const subtotalIds = subtotalRows.map((r: any) => r.id);
+
+    expect(subtotalIds).toEqual([
+      "Subtotal|Total IHG",
+      "Subtotal|Total IHG|AMER Operations",
+      "Subtotal|Total IHG|AMER Operations|Managed Ops",
+      "Subtotal|Total IHG|Six senses Total",
+    ]);
+
+    // Every subtotal row displays "All Brands" in Column B and rolled-up sum values
+    for (const subRow of subtotalRows) {
+      expect(subRow.data["long_metrics.brand"]?.value).toBe("All Brands");
+    }
+    const rootSub = subtotalRows.find((r: any) => r.id === "Subtotal|Total IHG");
+    expect(rootSub.data["long_metrics.total_sale_price"].value).toBe(500000);
+
+    // 4. Check line_item (Brand breakdown) rows:
+    // - "ZeroBrand" (0 / #Missing) is suppressed!
+    // - Deeper terminal branch "Managed Ops" has "Holiday Inn" and "InterContinental" brand breakdown rows
+    // - Ragged shallow leaf "Six senses Total" has its "Six Senses" brand breakdown row directly underneath its subtotal
+    const lineItems = allRows.filter((r: any) => r.type === "line_item");
+    const lineItemBrands = lineItems.map((r: any) => ({
+      rowId: r.id,
+      brand: r.data["long_metrics.brand"]?.value,
+      sales: r.data["long_metrics.total_sale_price"]?.value,
+    }));
+    expect(lineItemBrands).toEqual([
+      {
+        rowId: "Total IHG|AMER Operations|Managed Ops|Managed Ops|Holiday Inn",
+        brand: "Holiday Inn",
+        sales: 130000,
+      },
+      {
+        rowId: "Total IHG|AMER Operations|Managed Ops|Managed Ops|InterContinental",
+        brand: "InterContinental",
+        sales: 250000,
+      },
+      {
+        rowId: "Total IHG|Six senses Total|Six senses Total|Six senses Total|Six Senses",
+        brand: "Six Senses",
+        sales: 120000,
+      },
+    ]);
+
+    // 5. N-dimensional breakdown ([brand_collection, brand]) in Columns B & C
+    const collectionBreakdownDim = {
+      id: "brand_collection",
+      label: "Brand Collection",
+      fieldName: "long_metrics.brand_collection",
+      allLabel: "All Collections",
+    };
+    const multiDimRows = raggedBrandRows.map((r: any) => ({
+      ...r,
+      "long_metrics.brand_collection": {
+        value: r["long_metrics.brand"].value === "Holiday Inn" ? "Essentials" : "Luxury & Lifestyle",
+      },
+    }));
+    const projectedN = projectOutlineRowsToReportTable(
+      multiDimRows,
+      baseQueryResponse,
+      pcConfig,
+      4,
+      undefined,
+      [collectionBreakdownDim, brandBreakdownDim],
+    );
+    expect(projectedN.secondaryDimensions).toHaveLength(2);
+    const modelN = new VisPluginTableModel(
+      projectedN.queryResponse.data,
+      projectedN.queryResponse,
+      {
+        rowSubtotals: true,
+        subtotalStyle: "collapsed",
+        subtotalDepth: "4",
+        subtotalsOnTop: true,
+        startFolded: false,
+      },
+    );
+    const subRowsN = modelN.getDataRows().filter((r: any) => r.type === "subtotal");
+    for (const sr of subRowsN) {
+      expect(sr.data["long_metrics.brand_collection"]?.value).toBe("All Collections");
+      expect(sr.data["long_metrics.brand"]?.value).toBe("All Brands");
+    }
+    const lineItemsN = modelN.getDataRows().filter((r: any) => r.type === "line_item");
+    expect(
+      lineItemsN.map((r: any) => [
+        r.data["long_metrics.brand_collection"]?.value,
+        r.data["long_metrics.brand"]?.value,
+        r.data["long_metrics.total_sale_price"]?.value,
+      ]),
+    ).toEqual([
+      ["Essentials", "Holiday Inn", 130000],
+      ["Luxury & Lifestyle", "InterContinental", 250000],
+      ["Luxury & Lifestyle", "Six Senses", 120000],
+    ]);
+
+    // 6. URL state & breakdown_dimensions config round-trip
+    const urlStr = serializeLookBaseUrlState({
+      hierarchy: "total_ihg",
+      breakdown: "brand_collection,brand",
+    });
+    expect(parseLookBaseUrlState(urlStr)).toEqual({
+      hierarchy: "total_ihg",
+      breakdown: "brand_collection,brand",
+    });
+    expect(discoverBreakdownDimensions(DEFAULT_CALCULATIONS_CONFIG).map((d) => d.id)).toEqual([
+      "brand",
+      "category",
+      "department",
     ]);
   });
 });
