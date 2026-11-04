@@ -2872,6 +2872,67 @@ export function mergeOutlineRows(
   return Array.from(byId.values());
 }
 
+export const IHG_BRAND_TO_COLLECTION: Record<string, string> = {
+  "Six Senses": "Luxury & Lifestyle",
+  Regent: "Luxury & Lifestyle",
+  InterContinental: "Luxury & Lifestyle",
+  "Vignette Collection": "Luxury & Lifestyle",
+  Kimpton: "Luxury & Lifestyle",
+  "Hotel Indigo": "Luxury & Lifestyle",
+  voco: "Premium",
+  HUALUXE: "Premium",
+  "Crowne Plaza": "Premium",
+  "EVEN Hotels": "Premium",
+  Ruby: "Premium",
+  "Holiday Inn Express": "Essentials",
+  "Holiday Inn": "Essentials",
+  "avid hotels": "Essentials",
+  Garner: "Essentials",
+  "Atwell Suites": "Suites",
+  "Staybridge Suites": "Suites",
+  "Holiday Inn Club Vacations": "Suites",
+  "Candlewood Suites": "Suites",
+  Iberostar: "Other Brand Segments",
+  "Independent Brand": "Other Brand Segments",
+  Masterbrand: "Other Brand Segments",
+  "Mr and Mrs Smith": "Other Brand Segments",
+  "No Brand": "Other Brand Segments",
+  PAL: "Other Brand Segments",
+  Unbranded: "Other Brand Segments",
+};
+
+export interface SecondaryHierarchyNode {
+  id: string;
+  parentId: string | null;
+  label: string;
+  level: number;
+  isLeaf: boolean;
+  matchAll?: boolean;
+  leafValues: string[];
+}
+
+export interface MultiHierarchyCellMeta {
+  dimId: string;
+  nodeId: string;
+  parentId: string | null;
+  label: string;
+  level: number;
+  isLeaf: boolean;
+  isExpanded: boolean;
+  hasChildren: boolean;
+}
+
+export interface MultiHierarchyRowMeta {
+  rowIndex: number;
+  primaryNode: MultiHierarchyCellMeta & { memberId: string; path: string };
+  secondaryNodes: MultiHierarchyCellMeta[];
+}
+
+export interface MultiHierarchyOptions {
+  expandedPrimaryMemberIds?: string[];
+  expandedSecondaryIds?: Record<string, string[]>;
+}
+
 export interface ProjectedOutlineResult {
   queryResponse: any;
   pathToNode: Record<string, OutlineNodeMeta>;
@@ -2879,6 +2940,300 @@ export interface ProjectedOutlineResult {
   primaryHierarchyDepth?: number;
   secondaryDimension?: LookBaseBreakdownDimensionDef | null;
   secondaryDimensions?: LookBaseBreakdownDimensionDef[];
+  secondaryTrees?: Record<string, SecondaryHierarchyNode[]>;
+  multiHierarchyRowMeta?: MultiHierarchyRowMeta[];
+}
+
+function readDimValFromRow(row: Record<string, any>, fieldName: string): string {
+  const suffix = fieldName.split(".").pop() || "";
+  const hit =
+    row?.[fieldName] ??
+    Object.entries(row || {}).find(([k]) => k === suffix || k.endsWith(`.${suffix}`))?.[1];
+  const raw = hit !== null && typeof hit === "object" && "value" in hit ? hit.value : hit;
+  return String(raw ?? "").trim();
+}
+
+function rowHasAnyNonZeroNumeric(row: Record<string, any>, pcConfig?: ParentChildHierarchyConfig): boolean {
+  const skipKeys = new Set(
+    [
+      pcConfig?.memberIdField,
+      pcConfig?.parentIdField,
+      pcConfig?.labelField,
+      pcConfig?.pathField,
+      pcConfig?.levelField,
+      pcConfig?.isLeafField,
+      "dim_product_hierarchy.member_id",
+      "dim_product_hierarchy.parent_id",
+      "dim_product_hierarchy.member_label",
+      "dim_product_hierarchy.member_path",
+      "dim_product_hierarchy.level_num",
+      "dim_product_hierarchy.is_leaf",
+    ].filter(Boolean) as string[],
+  );
+  let sawNumeric = false;
+  const checkVal = (v: any): boolean => {
+    if (v === null || v === undefined) return false;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      sawNumeric = true;
+      return v !== 0;
+    }
+    if (typeof v === "object") {
+      if ("value" in v) return checkVal(v.value);
+      return Object.values(v).some(checkVal);
+    }
+    return false;
+  };
+  const anyNonZero = Object.entries(row || {}).some(([k, v]) => {
+    if (skipKeys.has(k) || k.endsWith(".level_num")) return false;
+    return checkVal(v);
+  });
+  return sawNumeric ? anyNonZero : true;
+}
+
+/**
+ * Builds an in-column drillable Secondary Hierarchy Tree for a selected breakdown dimension.
+ * - For `brand` (`long_metrics.brand`), builds the 5-level IHG Brand Hierarchy:
+ *   L0 `Total Brands`
+ *     ├─ L1 `Hotel Brands`
+ *     │    ├─ L2 `Six Senses Hotel Brands` → L3 `Six Senses`
+ *     │    └─ L2 `Hotel Brands excl Six Senses` → L3 Brand Collections → L4 Leaf Brands
+ *     └─ L1 `Other Brands` → L2 Other Leaf Brands
+ * - For any other dimension, builds a 2-level hierarchy (`All <Dimension>s` → Leaf Members).
+ */
+export function buildSecondaryHierarchyTree(
+  dimDef: LookBaseBreakdownDimensionDef,
+  outlineRows: Record<string, any>[],
+  pcConfig?: ParentChildHierarchyConfig,
+): SecondaryHierarchyNode[] {
+  const isBrandDim =
+    dimDef.id === "brand" ||
+    dimDef.fieldName === "long_metrics.brand" ||
+    dimDef.fieldName.endsWith(".brand");
+
+  const activeRows = (outlineRows || []).filter((r) => rowHasAnyNonZeroNumeric(r, pcConfig));
+
+  if (isBrandDim) {
+    const brandToColl = new Map<string, string>();
+    for (const r of activeRows) {
+      const b = readDimValFromRow(r, dimDef.fieldName);
+      if (!b) continue;
+      const rowColl = readDimValFromRow(r, "long_metrics.brand_collection");
+      const resolvedColl = rowColl || IHG_BRAND_TO_COLLECTION[b] || "Other Brand Segments";
+      if (!brandToColl.has(b)) {
+        brandToColl.set(b, resolvedColl);
+      }
+    }
+    if (brandToColl.size === 0) {
+      for (const [b, c] of Object.entries(IHG_BRAND_TO_COLLECTION)) {
+        brandToColl.set(b, c);
+      }
+    }
+
+    const allBrands = Array.from(brandToColl.keys()).sort((a, b) => a.localeCompare(b));
+    const coreCollOrder = ["Essentials", "Luxury & Lifestyle", "Premium", "Suites"];
+    const collToBrands = new Map<string, string[]>();
+    const otherBrands: string[] = [];
+
+    for (const b of allBrands) {
+      if (b === "Six Senses") continue;
+      const coll = brandToColl.get(b) || "Other Brand Segments";
+      if (coll === "Other Brand Segments" || coll === "Other Brands") {
+        otherBrands.push(b);
+      } else {
+        if (!collToBrands.has(coll)) collToBrands.set(coll, []);
+        collToBrands.get(coll)!.push(b);
+      }
+    }
+
+    const hotelExclSxBrands = Array.from(collToBrands.values()).flat();
+    const hotelBrandsAll = Array.from(new Set(["Six Senses", ...hotelExclSxBrands]));
+    const otherCanonicalLeafValues =
+      otherBrands.length > 0
+        ? otherBrands
+        : Object.entries(IHG_BRAND_TO_COLLECTION)
+            .filter(([, c]) => c === "Other Brand Segments")
+            .map(([b]) => b);
+
+    const tree: SecondaryHierarchyNode[] = [
+      {
+        id: "BR:TOTAL",
+        parentId: null,
+        label: "Total Brands",
+        level: 0,
+        isLeaf: false,
+        matchAll: true,
+        leafValues: allBrands,
+      },
+      {
+        id: "BR:HOTEL_BRANDS",
+        parentId: "BR:TOTAL",
+        label: "Hotel Brands",
+        level: 1,
+        isLeaf: false,
+        leafValues: hotelBrandsAll,
+      },
+      {
+        id: "BR:SIX_SENSES_GROUP",
+        parentId: "BR:HOTEL_BRANDS",
+        label: "Six Senses Hotel Brands",
+        level: 2,
+        isLeaf: false,
+        leafValues: ["Six Senses"],
+      },
+      {
+        id: "BR:LEAF:Six Senses",
+        parentId: "BR:SIX_SENSES_GROUP",
+        label: "Six Senses",
+        level: 3,
+        isLeaf: true,
+        leafValues: ["Six Senses"],
+      },
+      {
+        id: "BR:HOTEL_EXCL_SX",
+        parentId: "BR:HOTEL_BRANDS",
+        label: "Hotel Brands excl Six Senses",
+        level: 2,
+        isLeaf: hotelExclSxBrands.length === 0,
+        leafValues: hotelExclSxBrands,
+      },
+    ];
+
+    const orderedCollections = [
+      ...coreCollOrder.filter((c) => collToBrands.has(c)),
+      ...Array.from(collToBrands.keys())
+        .filter((c) => !coreCollOrder.includes(c))
+        .sort((a, b) => a.localeCompare(b)),
+    ];
+
+    for (const coll of orderedCollections) {
+      const brandsInColl = (collToBrands.get(coll) || []).sort((a, b) => a.localeCompare(b));
+      const collId = `BR:COLL:${coll}`;
+      tree.push({
+        id: collId,
+        parentId: "BR:HOTEL_EXCL_SX",
+        label: coll,
+        level: 3,
+        isLeaf: brandsInColl.length === 0,
+        leafValues: brandsInColl,
+      });
+      for (const b of brandsInColl) {
+        tree.push({
+          id: `BR:LEAF:${b}`,
+          parentId: collId,
+          label: b,
+          level: 4,
+          isLeaf: true,
+          leafValues: [b],
+        });
+      }
+    }
+
+    tree.push({
+      id: "BR:OTHER_BRANDS",
+      parentId: "BR:TOTAL",
+      label: "Other Brands",
+      level: 1,
+      isLeaf: otherBrands.length === 0,
+      leafValues: otherCanonicalLeafValues,
+    });
+    for (const b of otherBrands) {
+      tree.push({
+        id: `BR:LEAF:${b}`,
+        parentId: "BR:OTHER_BRANDS",
+        label: b,
+        level: 2,
+        isLeaf: true,
+        leafValues: [b],
+      });
+    }
+
+    return tree;
+  }
+
+  const distinctVals = Array.from(
+    new Set(activeRows.map((r) => readDimValFromRow(r, dimDef.fieldName)).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b));
+
+  const rootId = `${dimDef.id}:TOTAL`;
+  const rootLabel = dimDef.allLabel || `Total ${dimDef.label}s`;
+  const tree: SecondaryHierarchyNode[] = [
+    {
+      id: rootId,
+      parentId: null,
+      label: rootLabel,
+      level: 0,
+      isLeaf: distinctVals.length === 0,
+      matchAll: true,
+      leafValues: distinctVals,
+    },
+  ];
+  for (const val of distinctVals) {
+    tree.push({
+      id: `${dimDef.id}:LEAF:${val}`,
+      parentId: rootId,
+      label: val,
+      level: 1,
+      isLeaf: true,
+      leafValues: [val],
+    });
+  }
+  return tree;
+}
+
+export function getDefaultExpandedSecondaryIds(
+  dimDef: LookBaseBreakdownDimensionDef,
+  tree?: SecondaryHierarchyNode[],
+): string[] {
+  const isBrandDim =
+    dimDef.id === "brand" ||
+    dimDef.fieldName === "long_metrics.brand" ||
+    dimDef.fieldName.endsWith(".brand");
+  if (isBrandDim) {
+    return ["BR:TOTAL", "BR:HOTEL_BRANDS"];
+  }
+  return [tree?.[0]?.id || `${dimDef.id}:TOTAL`];
+}
+
+export function getVisibleSecondaryHierarchyNodes(
+  tree: SecondaryHierarchyNode[],
+  expandedIds: string[],
+): SecondaryHierarchyNode[] {
+  const expandedSet = new Set(expandedIds || []);
+  const byId = new Map<string, SecondaryHierarchyNode>();
+  for (const n of tree) byId.set(n.id, n);
+
+  return tree.filter((node) => {
+    let currParentId = node.parentId;
+    while (currParentId) {
+      if (!expandedSet.has(currParentId)) return false;
+      currParentId = byId.get(currParentId)?.parentId ?? null;
+    }
+    return true;
+  });
+}
+
+export function toggleSecondaryHierarchyNode(
+  tree: SecondaryHierarchyNode[],
+  currentExpandedIds: string[],
+  nodeId: string,
+): string[] {
+  const expandedSet = new Set(currentExpandedIds || []);
+  if (!expandedSet.has(nodeId)) {
+    expandedSet.add(nodeId);
+    return Array.from(expandedSet);
+  }
+  const toRemove = new Set<string>([nodeId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const n of tree) {
+      if (n.parentId && toRemove.has(n.parentId) && !toRemove.has(n.id)) {
+        toRemove.add(n.id);
+        added = true;
+      }
+    }
+  }
+  return Array.from(expandedSet).filter((id) => !toRemove.has(id));
 }
 
 /**
@@ -2954,6 +3309,7 @@ export function projectOutlineRowsToReportTable(
   totalHierarchyDepth = 4,
   selectedMemberIds?: string[],
   secondaryDim?: LookBaseBreakdownDimensionDef | LookBaseBreakdownDimensionDef[] | null,
+  multiHierarchyOptions?: MultiHierarchyOptions,
 ): ProjectedOutlineResult {
   const normalizedBase = normalizeQueryResponseFields(baseQueryResponse || {});
   const measureFields: any[] = Array.isArray(normalizedBase?.fields?.measure_like)
@@ -3112,7 +3468,7 @@ export function projectOutlineRowsToReportTable(
   const hasSecondaryDim = secondaryDims.length > 0;
   const syntheticDims = hasSecondaryDim
     ? [
-        ...primaryDims,
+        primaryDims[0],
         ...secondaryDims.map((d) => ({
           name: d.fieldName,
           label: d.label,
@@ -3126,6 +3482,8 @@ export function projectOutlineRowsToReportTable(
   const subtotalsData: Record<string, any[]> = {};
   const leafDataRows: Record<string, any>[] = [];
   const parentPathsWithChildren = new Set<string>();
+  const secondaryTrees: Record<string, SecondaryHierarchyNode[]> = {};
+  const multiHierarchyRowMeta: MultiHierarchyRowMeta[] = [];
 
   for (const node of nodes) {
     const parts = node.path.split("|");
@@ -3165,6 +3523,21 @@ export function projectOutlineRowsToReportTable(
     }
   };
 
+  const fillMissingMeasures = (targetRow: Record<string, any>) => {
+    for (const m of measureFields) {
+      const mName = m.name;
+      if (normalizedPivots.length > 0) {
+        const pivotCells: Record<string, any> = {};
+        for (const p of normalizedPivots) {
+          pivotCells[p.key] = { value: undefined, rendered: "#Missing" };
+        }
+        targetRow[mName] = pivotCells;
+      } else {
+        targetRow[mName] = { value: undefined, rendered: "#Missing" };
+      }
+    }
+  };
+
   const hasNonZeroMeasureActivity = (row: Record<string, any>): boolean =>
     measureFields.some((m) => {
       const cells = normalizedPivots.length
@@ -3190,129 +3563,176 @@ export function projectOutlineRowsToReportTable(
     return String(raw ?? "").trim() || (fallbackNode?.isLeaf ? fallbackNode.label : "");
   };
 
-  for (const node of nodes) {
-    const parts = node.path.split("|");
-    const depth = parts.length; // 1-based depth (1 = Root 'All Products', 2 = Dept 'Men', etc.)
+  if (hasSecondaryDim) {
+    // 1. Determine visible Primary Hierarchy nodes (Column A)
+    const hasExplicitPrimaryExp = Array.isArray(multiHierarchyOptions?.expandedPrimaryMemberIds);
+    const expandedPrimarySet = hasExplicitPrimaryExp
+      ? new Set(multiHierarchyOptions!.expandedPrimaryMemberIds)
+      : new Set(nodes.filter((n) => parentPathsWithChildren.has(n.path)).map((n) => n.memberId));
 
-    if (hasSecondaryDim) {
-      const clampedDepth = Math.min(depth, maxDepth);
-      const depthKey = String(clampedDepth);
-      if (!subtotalsData[depthKey]) subtotalsData[depthKey] = [];
-      const grouping = primaryDims.slice(0, clampedDepth).map((d) => d.name);
-      const subRow: Record<string, any> = {
-        $$$__grouping__$$$: grouping,
-        _member_id: node.memberId,
-        _parent_id: node.parentId,
+    const visiblePrimaryNodes = nodes.filter((n) => {
+      if (!hasExplicitPrimaryExp) return true;
+      let currParentId = n.parentId;
+      while (currParentId && currParentId !== "ROOT") {
+        if (!expandedPrimarySet.has(currParentId)) return false;
+        currParentId = memberIdToNode[currParentId]?.parentId || "";
+      }
+      return true;
+    });
+
+    // 2. Build Secondary Hierarchy Tree & visible nodes for each selected breakdown dimension (Columns B, C, ...)
+    const secDimExecution = secondaryDims.map((d) => {
+      const tree = buildSecondaryHierarchyTree(d, outlineRows, pcConfig);
+      secondaryTrees[d.id] = tree;
+      const expIds =
+        multiHierarchyOptions?.expandedSecondaryIds?.[d.id] ??
+        getDefaultExpandedSecondaryIds(d, tree);
+      const expSet = new Set(expIds);
+      const visNodes = getVisibleSecondaryHierarchyNodes(tree, expIds);
+      return {
+        dimDef: d,
+        tree,
+        expSet,
+        visNodes,
+        leafSetByNodeId: new Map<string, Set<string>>(
+          tree.map((sn) => [sn.id, new Set(sn.leafValues)]),
+        ),
       };
-      for (let i = 0; i < maxDepth; i++) {
-        subRow[`__lookbase_lvl_${i}`] = {
-          value: i < clampedDepth ? parts[i] : null,
-          rendered: i < clampedDepth ? parts[i] : "",
-        };
-      }
-      for (const d of secondaryDims) {
-        const allLbl = d.allLabel || `All ${d.label}s`;
-        subRow[d.fieldName] = { value: allLbl, rendered: allLbl };
-      }
-      copyMeasures(node.rawRow, subRow, false);
-      subtotalsData[depthKey].push(subRow);
+    });
 
-      // Emit N-dimensional breakdown rows for bottom visible / terminal branches (with #Missing zero-suppression)
-      if (!parentPathsWithChildren.has(node.path)) {
-        const candidateRows = rowsByMemberId.get(node.memberId) || [node.rawRow];
-        const byTuple = new Map<string, { vals: string[]; rows: Record<string, any>[] }>();
-        for (const r of candidateRows) {
-          const vals = secondaryDims.map((d) => readSecondaryVal(r, d, node));
-          if (vals.some((v) => !v) || !hasNonZeroMeasureActivity(r)) continue;
-          const tupleKey = vals.join("||");
-          if (!byTuple.has(tupleKey)) byTuple.set(tupleKey, { vals, rows: [] });
-          byTuple.get(tupleKey)!.rows.push(r);
+    // Cartesian cross-product helper over all active secondary dimension visible nodes
+    let secTuples: SecondaryHierarchyNode[][] = [[]];
+    for (const sec of secDimExecution) {
+      const next: SecondaryHierarchyNode[][] = [];
+      for (const prefix of secTuples) {
+        for (const sn of sec.visNodes) {
+          next.push([...prefix, sn]);
         }
-        if (byTuple.size > 0) {
-          const sortedTuples = Array.from(byTuple.entries()).sort((a, b) =>
-            a[0].localeCompare(b[0]),
-          );
-          for (const [tupleKey, { vals, rows: tRows }] of sortedTuples) {
-            const aggRow = tRows.length > 1 ? aggregateMemberRows(tRows) : tRows[0];
-            const leafRow: Record<string, any> = {
-              _member_id: node.memberId,
-              _parent_id: node.parentId,
-              _breakdown_value: tupleKey,
-            };
-            for (let i = 0; i < maxDepth; i++) {
-              const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
-              leafRow[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
-            }
-            secondaryDims.forEach((d, idx) => {
-              leafRow[d.fieldName] = { value: vals[idx], rendered: vals[idx] };
-            });
-            copyMeasures(aggRow, leafRow, false);
-            leafDataRows.push(leafRow);
-          }
+      }
+      secTuples = next;
+    }
+
+    for (const pNode of visiblePrimaryNodes) {
+      const pDepth = Math.max(0, pNode.path.split("|").length - 1);
+      const pHasChildren = !pNode.isLeaf || parentPathsWithChildren.has(pNode.path);
+      const pIsExpanded =
+        pHasChildren &&
+        expandedPrimarySet.has(pNode.memberId) &&
+        parentPathsWithChildren.has(pNode.path);
+      const candidateRows = (rowsByMemberId.get(pNode.memberId) || []).filter(
+        hasNonZeroMeasureActivity,
+      );
+
+      for (const secTuple of secTuples) {
+        const matchingRows = candidateRows.filter((r) =>
+          secTuple.every((sn, idx) => {
+            if (sn.matchAll) return true;
+            const val = readSecondaryVal(r, secDimExecution[idx].dimDef, pNode);
+            return secDimExecution[idx].leafSetByNodeId.get(sn.id)?.has(val) ?? false;
+          }),
+        );
+
+        const dataRow: Record<string, any> = {
+          _member_id: pNode.memberId,
+          _parent_id: pNode.parentId,
+          _secondary_node_ids: secTuple.map((sn) => sn.id).join("||"),
+          __lookbase_lvl_0: { value: pNode.label, rendered: pNode.label },
+        };
+        secTuple.forEach((sn, idx) => {
+          const fName = secDimExecution[idx].dimDef.fieldName;
+          dataRow[fName] = { value: sn.label, rendered: sn.label };
+        });
+
+        if (matchingRows.length > 0) {
+          const aggRow =
+            matchingRows.length > 1 ? aggregateMemberRows(matchingRows) : matchingRows[0];
+          copyMeasures(aggRow, dataRow, false);
         } else {
+          fillMissingMeasures(dataRow);
+        }
+
+        const rowIndex = leafDataRows.length;
+        leafDataRows.push(dataRow);
+        multiHierarchyRowMeta.push({
+          rowIndex,
+          primaryNode: {
+            dimId: "__primary__",
+            nodeId: pNode.memberId,
+            memberId: pNode.memberId,
+            parentId: pNode.parentId || null,
+            label: pNode.label,
+            path: pNode.path,
+            level: pDepth,
+            isLeaf: !pHasChildren,
+            isExpanded: pIsExpanded,
+            hasChildren: pHasChildren,
+          },
+          secondaryNodes: secTuple.map((sn, idx) => ({
+            dimId: secDimExecution[idx].dimDef.id,
+            nodeId: sn.id,
+            parentId: sn.parentId,
+            label: sn.label,
+            level: sn.level,
+            isLeaf: sn.isLeaf,
+            isExpanded: !sn.isLeaf && secDimExecution[idx].expSet.has(sn.id),
+            hasChildren: !sn.isLeaf,
+          })),
+        });
+      }
+    }
+  } else {
+    for (const node of nodes) {
+      const parts = node.path.split("|");
+      const depth = parts.length; // 1-based depth (1 = Root 'All Products', 2 = Dept 'Men', etc.)
+
+      if (!node.isLeaf && depth < maxDepth) {
+        const depthKey = String(depth);
+        if (!subtotalsData[depthKey]) subtotalsData[depthKey] = [];
+        const grouping = syntheticDims.slice(0, depth).map((d) => d.name);
+        const subRow: Record<string, any> = {
+          $$$__grouping__$$$: grouping,
+          _member_id: node.memberId,
+          _parent_id: node.parentId,
+        };
+        for (let i = 0; i < maxDepth; i++) {
+          subRow[`__lookbase_lvl_${i}`] = {
+            value: i < depth ? parts[i] : null,
+            rendered: i < depth ? parts[i] : "",
+          };
+        }
+        copyMeasures(node.rawRow, subRow, false);
+        subtotalsData[depthKey].push(subRow);
+
+        // If this non-leaf node has no loaded children yet, add a hidden placeholder leaf row
+        // so VisPluginTableModel materializes the parent subtotal group with a [+] icon.
+        if (!parentPathsWithChildren.has(node.path)) {
           const placeholderLeaf: Record<string, any> = {
             _is_placeholder: true,
             _parent_member_id: node.memberId,
           };
           for (let i = 0; i < maxDepth; i++) {
-            const val = parts[i] ?? parts[parts.length - 1] ?? node.label;
+            const val = i < depth ? parts[i] : `(Expand ${node.label}...)`;
             placeholderLeaf[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
-          }
-          for (const d of secondaryDims) {
-            const allLbl = d.allLabel || `All ${d.label}s`;
-            placeholderLeaf[d.fieldName] = { value: allLbl, rendered: allLbl };
           }
           copyMeasures(node.rawRow, placeholderLeaf, true);
           leafDataRows.push(placeholderLeaf);
         }
-      }
-    } else if (!node.isLeaf && depth < maxDepth) {
-      const depthKey = String(depth);
-      if (!subtotalsData[depthKey]) subtotalsData[depthKey] = [];
-      const grouping = syntheticDims.slice(0, depth).map((d) => d.name);
-      const subRow: Record<string, any> = {
-        $$$__grouping__$$$: grouping,
-        _member_id: node.memberId,
-        _parent_id: node.parentId,
-      };
-      for (let i = 0; i < maxDepth; i++) {
-        subRow[`__lookbase_lvl_${i}`] = {
-          value: i < depth ? parts[i] : null,
-          rendered: i < depth ? parts[i] : "",
-        };
-      }
-      copyMeasures(node.rawRow, subRow, false);
-      subtotalsData[depthKey].push(subRow);
-
-      // If this non-leaf node has no loaded children yet, add a hidden placeholder leaf row
-      // so VisPluginTableModel materializes the parent subtotal group with a [+] icon.
-      if (!parentPathsWithChildren.has(node.path)) {
-        const placeholderLeaf: Record<string, any> = {
-          _is_placeholder: true,
-          _parent_member_id: node.memberId,
+      } else {
+        // Leaf node (including shallow ragged leaves at depth < maxDepth)
+        const leafRow: Record<string, any> = {
+          _member_id: node.memberId,
+          _parent_id: node.parentId,
         };
         for (let i = 0; i < maxDepth; i++) {
-          const val = i < depth ? parts[i] : `(Expand ${node.label}...)`;
-          placeholderLeaf[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
+          const val =
+            depth < maxDepth
+              ? parts[i < depth - 1 ? i : i < maxDepth - 1 ? Math.max(0, depth - 2) : depth - 1] ?? node.label
+              : parts[i] ?? parts[parts.length - 1] ?? node.label;
+          leafRow[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
         }
-        copyMeasures(node.rawRow, placeholderLeaf, true);
-        leafDataRows.push(placeholderLeaf);
+        copyMeasures(node.rawRow, leafRow, false);
+        leafDataRows.push(leafRow);
       }
-    } else {
-      // Leaf node (including shallow ragged leaves at depth < maxDepth)
-      const leafRow: Record<string, any> = {
-        _member_id: node.memberId,
-        _parent_id: node.parentId,
-      };
-      for (let i = 0; i < maxDepth; i++) {
-        const val =
-          depth < maxDepth
-            ? parts[i < depth - 1 ? i : i < maxDepth - 1 ? Math.max(0, depth - 2) : depth - 1] ?? node.label
-            : parts[i] ?? parts[parts.length - 1] ?? node.label;
-        leafRow[`__lookbase_lvl_${i}`] = { value: val, rendered: val };
-      }
-      copyMeasures(node.rawRow, leafRow, false);
-      leafDataRows.push(leafRow);
     }
   }
 
@@ -3345,6 +3765,8 @@ export function projectOutlineRowsToReportTable(
     primaryHierarchyDepth: maxDepth,
     secondaryDimension: secondaryDims[0] || null,
     secondaryDimensions: secondaryDims,
+    secondaryTrees,
+    multiHierarchyRowMeta,
   };
 }
 

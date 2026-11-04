@@ -5,6 +5,7 @@ import {
   buildAlterBiCapacitySql,
   buildAutocompleteCatalog,
   buildLookerFilterExpression,
+  buildSecondaryHierarchyTree,
   canUserRebuildCube,
   canUserUpdateSettings,
   DEFAULT_AUTOCOMPLETE_MEMBER_LEVELS,
@@ -27,6 +28,7 @@ import {
   fetchOutlineChildren,
   formatEssbaseValue,
   formatMonthYearLabel,
+  getDefaultExpandedSecondaryIds,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
@@ -34,6 +36,7 @@ import {
   getStarterOutlineForConfig,
   getVirtualizedAutocompleteWindow,
   getVisibleHierarchyModalNodes,
+  getVisibleSecondaryHierarchyNodes,
   isCustomCalculationsConfig,
   isLookerAdminUser,
   loadProjectCalculations,
@@ -51,6 +54,7 @@ import {
   STARTER_HIERARCHY_CATALOG_NODES,
   STARTER_OUTLINE_QUERY_RESPONSE,
   toggleHierarchyNodeTriState,
+  toggleSecondaryHierarchyNode,
   unflattenStringsJsonToConfig,
   validateLookBaseSettings,
 } from "../src/essbaseEngine";
@@ -1590,78 +1594,149 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       projected.memberIdToNode["CAT:AMER|Managed"].rawRow["long_metrics.total_sale_price"].value,
     ).toBe(380000);
 
-    // 2. Build VisPluginTableModel with subtotalDepth = String(maxLevels) ('4') when secondaryDim is active
+    // 2. Build VisPluginTableModel with rowSubtotals: false (in-column Multi-Hierarchy mode)
     const model = new VisPluginTableModel(
       projected.queryResponse.data,
       projected.queryResponse,
       {
-        rowSubtotals: true,
-        subtotalStyle: "collapsed",
-        subtotalDepth: "4",
-        subtotalsOnTop: true,
-        startFolded: false,
+        rowSubtotals: false,
+        indexColumn: false,
+        spanRows: false,
       },
     );
 
-    // Column A (__lookbase_lvl_0) and Column B (long_metrics.brand) are both visible, while __lookbase_lvl_1..3 are hidden
+    // Column A (__lookbase_lvl_0) and Column B (long_metrics.brand) are both visible single-column hierarchies
     const visibleDimCols = model.columns.filter(
       (c: any) => c.id.startsWith("__lookbase_lvl_") || c.id === "long_metrics.brand",
     );
-    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_0")?.hide).toBe(false);
-    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_1")?.hide).toBe(true);
-    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_2")?.hide).toBe(true);
-    expect(visibleDimCols.find((c: any) => c.id === "__lookbase_lvl_3")?.hide).toBe(true);
-    expect(visibleDimCols.find((c: any) => c.id === "long_metrics.brand")?.hide).toBe(false);
+    expect(visibleDimCols.map((c: any) => c.id)).toEqual([
+      "__lookbase_lvl_0",
+      "long_metrics.brand",
+    ]);
+    expect(visibleDimCols.every((c: any) => c.hide === false)).toBe(true);
 
-    // 3. Check generated subtotal rows:
-    // - No duplicate intermediate ragged subtotals for "Six senses Total" at depth 3 or 4!
+    // 3. Default Brand Hierarchy expansion shows the 5-row Essbase Smart View Brand structure under every visible primary node:
+    // Total Brands (L0) -> Hotel Brands (L1) -> Six Senses Hotel Brands (L2), Hotel Brands excl Six Senses (L2), Other Brands (L1)
+    const brandTree = projected.secondaryTrees?.["brand"] || [];
+    const defaultBrandExpanded = getDefaultExpandedSecondaryIds(brandBreakdownDim, brandTree);
+    expect(defaultBrandExpanded).toEqual(["BR:TOTAL", "BR:HOTEL_BRANDS"]);
+    expect(
+      getVisibleSecondaryHierarchyNodes(brandTree, defaultBrandExpanded).map((n) => ({
+        label: n.label,
+        level: n.level,
+      })),
+    ).toEqual([
+      { label: "Total Brands", level: 0 },
+      { label: "Hotel Brands", level: 1 },
+      { label: "Six Senses Hotel Brands", level: 2 },
+      { label: "Hotel Brands excl Six Senses", level: 2 },
+      { label: "Other Brands", level: 1 },
+    ]);
+
+    // 4 visible primary nodes (Total IHG, AMER Operations, Managed Ops, Six senses Total) × 5 visible Brand nodes = 20 rows
     const allRows = model.getDataRows();
-    const subtotalRows = allRows.filter((r: any) => r.type === "subtotal");
-    const subtotalIds = subtotalRows.map((r: any) => r.id);
+    expect(allRows).toHaveLength(20);
 
-    expect(subtotalIds).toEqual([
-      "Subtotal|Total IHG",
-      "Subtotal|Total IHG|AMER Operations",
-      "Subtotal|Total IHG|AMER Operations|Managed Ops",
-      "Subtotal|Total IHG|Six senses Total",
+    // Inspect the 5 Brand Hierarchy rows under "AMER Operations" (which has Holiday Inn=130k, InterContinental=250k, no Six Senses, and ZeroBrand=0):
+    const amerRows = allRows.slice(5, 10);
+    expect(
+      amerRows.map((r: any) => ({
+        primary: r.data["__lookbase_lvl_0"]?.value,
+        brandNode: r.data["long_metrics.brand"]?.value,
+        value: r.data["long_metrics.total_sale_price"]?.value,
+        rendered: r.data["long_metrics.total_sale_price"]?.rendered,
+      })),
+    ).toEqual([
+      {
+        primary: "AMER Operations",
+        brandNode: "Total Brands",
+        value: 380000,
+        rendered: "$380,000",
+      },
+      {
+        primary: "AMER Operations",
+        brandNode: "Hotel Brands",
+        value: 380000,
+        rendered: "$380,000",
+      },
+      {
+        primary: "AMER Operations",
+        brandNode: "Six Senses Hotel Brands",
+        value: undefined,
+        rendered: "#Missing",
+      },
+      {
+        primary: "AMER Operations",
+        brandNode: "Hotel Brands excl Six Senses",
+        value: 380000,
+        rendered: "$380,000",
+      },
+      {
+        primary: "AMER Operations",
+        brandNode: "Other Brands",
+        value: undefined,
+        rendered: "#Missing",
+      },
     ]);
 
-    // Every subtotal row displays "All Brands" in Column B and rolled-up sum values
-    for (const subRow of subtotalRows) {
-      expect(subRow.data["long_metrics.brand"]?.value).toBe("All Brands");
-    }
-    const rootSub = subtotalRows.find((r: any) => r.id === "Subtotal|Total IHG");
-    expect(rootSub.data["long_metrics.total_sale_price"].value).toBe(500000);
+    // 4. Drill down in-column on "Hotel Brands excl Six Senses" -> reveals Brand Collections ("Essentials", "Luxury & Lifestyle") at level 3,
+    // and drill down on "Essentials" -> reveals leaf brand "Holiday Inn" at level 4!
+    let expandedBrandIds = toggleSecondaryHierarchyNode(
+      brandTree,
+      defaultBrandExpanded,
+      "BR:HOTEL_EXCL_SX",
+    );
+    expandedBrandIds = toggleSecondaryHierarchyNode(
+      brandTree,
+      expandedBrandIds,
+      "BR:COLL:Essentials",
+    );
 
-    // 4. Check line_item (Brand breakdown) rows:
-    // - "ZeroBrand" (0 / #Missing) is suppressed!
-    // - Deeper terminal branch "Managed Ops" has "Holiday Inn" and "InterContinental" brand breakdown rows
-    // - Ragged shallow leaf "Six senses Total" has its "Six Senses" brand breakdown row directly underneath its subtotal
-    const lineItems = allRows.filter((r: any) => r.type === "line_item");
-    const lineItemBrands = lineItems.map((r: any) => ({
-      rowId: r.id,
-      brand: r.data["long_metrics.brand"]?.value,
-      sales: r.data["long_metrics.total_sale_price"]?.value,
-    }));
-    expect(lineItemBrands).toEqual([
+    const projectedDrilled = projectOutlineRowsToReportTable(
+      merged,
+      baseQueryResponse,
+      pcConfig,
+      4,
+      undefined,
+      brandBreakdownDim,
       {
-        rowId: "Total IHG|AMER Operations|Managed Ops|Managed Ops|Holiday Inn",
-        brand: "Holiday Inn",
-        sales: 130000,
+        expandedPrimaryMemberIds: ["ALL", "DEPT:AMER Operations"],
+        expandedSecondaryIds: { brand: expandedBrandIds },
       },
-      {
-        rowId: "Total IHG|AMER Operations|Managed Ops|Managed Ops|InterContinental",
-        brand: "InterContinental",
-        sales: 250000,
-      },
-      {
-        rowId: "Total IHG|Six senses Total|Six senses Total|Six senses Total|Six Senses",
-        brand: "Six Senses",
-        sales: 120000,
-      },
+    );
+    const managedDrilledMeta = (projectedDrilled.multiHierarchyRowMeta || []).filter(
+      (m) => m.primaryNode.memberId === "CAT:AMER|Managed",
+    );
+    expect(
+      managedDrilledMeta.map((m) => ({
+        brandLabel: m.secondaryNodes[0].label,
+        level: m.secondaryNodes[0].level,
+        sales:
+          projectedDrilled.queryResponse.data[m.rowIndex]["long_metrics.total_sale_price"]
+            ?.rendered,
+      })),
+    ).toEqual([
+      { brandLabel: "Total Brands", level: 0, sales: "$380,000" },
+      { brandLabel: "Hotel Brands", level: 1, sales: "$380,000" },
+      { brandLabel: "Six Senses Hotel Brands", level: 2, sales: "#Missing" },
+      { brandLabel: "Hotel Brands excl Six Senses", level: 2, sales: "$380,000" },
+      { brandLabel: "Essentials", level: 3, sales: "$130,000" },
+      { brandLabel: "Holiday Inn", level: 4, sales: "$130,000" },
+      { brandLabel: "Luxury & Lifestyle", level: 3, sales: "$250,000" },
+      { brandLabel: "Other Brands", level: 1, sales: "#Missing" },
     ]);
 
-    // 5. N-dimensional breakdown ([brand_collection, brand]) in Columns B & C
+    // Fold "Hotel Brands" back up -> collapses descendants so only Total Brands, Hotel Brands, and Other Brands remain
+    const foldedBrandIds = toggleSecondaryHierarchyNode(
+      brandTree,
+      expandedBrandIds,
+      "BR:HOTEL_BRANDS",
+    );
+    expect(
+      getVisibleSecondaryHierarchyNodes(brandTree, foldedBrandIds).map((n) => n.label),
+    ).toEqual(["Total Brands", "Hotel Brands", "Other Brands"]);
+
+    // 5. N-dimensional in-column hierarchies ([brand_collection, brand]) in Columns B & C
     const collectionBreakdownDim = {
       id: "brand_collection",
       label: "Brand Collection",
@@ -1681,35 +1756,27 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       4,
       undefined,
       [collectionBreakdownDim, brandBreakdownDim],
-    );
-    expect(projectedN.secondaryDimensions).toHaveLength(2);
-    const modelN = new VisPluginTableModel(
-      projectedN.queryResponse.data,
-      projectedN.queryResponse,
       {
-        rowSubtotals: true,
-        subtotalStyle: "collapsed",
-        subtotalDepth: "4",
-        subtotalsOnTop: true,
-        startFolded: false,
+        expandedPrimaryMemberIds: [], // Only root Total IHG visible in Col A
+        expandedSecondaryIds: {
+          brand_collection: ["brand_collection:TOTAL"], // All Collections + Essentials + Luxury & Lifestyle (3 nodes)
+          brand: [], // Only Total Brands visible in Col C (1 node)
+        },
       },
     );
-    const subRowsN = modelN.getDataRows().filter((r: any) => r.type === "subtotal");
-    for (const sr of subRowsN) {
-      expect(sr.data["long_metrics.brand_collection"]?.value).toBe("All Collections");
-      expect(sr.data["long_metrics.brand"]?.value).toBe("All Brands");
-    }
-    const lineItemsN = modelN.getDataRows().filter((r: any) => r.type === "line_item");
+    expect(projectedN.secondaryDimensions).toHaveLength(2);
+    expect(projectedN.queryResponse.data).toHaveLength(3);
     expect(
-      lineItemsN.map((r: any) => [
-        r.data["long_metrics.brand_collection"]?.value,
-        r.data["long_metrics.brand"]?.value,
-        r.data["long_metrics.total_sale_price"]?.value,
+      projectedN.queryResponse.data.map((r: any) => [
+        r["__lookbase_lvl_0"]?.value,
+        r["long_metrics.brand_collection"]?.value,
+        r["long_metrics.brand"]?.value,
+        r["long_metrics.total_sale_price"]?.rendered,
       ]),
     ).toEqual([
-      ["Essentials", "Holiday Inn", 130000],
-      ["Luxury & Lifestyle", "InterContinental", 250000],
-      ["Luxury & Lifestyle", "Six Senses", 120000],
+      ["Total IHG", "All Collections", "Total Brands", "$500,000"],
+      ["Total IHG", "Essentials", "Total Brands", "#Missing"],
+      ["Total IHG", "Luxury & Lifestyle", "Total Brands", "$500,000"],
     ]);
 
     // 6. URL state & breakdown_dimensions config round-trip
