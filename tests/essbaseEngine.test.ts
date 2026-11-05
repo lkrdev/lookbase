@@ -11,7 +11,9 @@ import {
   DEFAULT_AUTOCOMPLETE_MEMBER_LEVELS,
   DEFAULT_CALCULATIONS_CONFIG,
   DEFAULT_MODAL_UNFOLDED_IDS,
+  DEFAULT_PRIMARY_HIERARCHY_COL_WIDTH,
   DEFAULT_QUICK_START_ACTIONS,
+  DEFAULT_SECONDARY_HIERARCHY_COL_WIDTH,
   deriveExpandedPathsFromMemberIds,
   discoverBIEngineCandidateTables,
   discoverBreakdownDimensions,
@@ -28,14 +30,18 @@ import {
   fetchOutlineChildren,
   formatEssbaseValue,
   formatMonthYearLabel,
+  getAllSecondaryNodeIds,
   getDefaultExpandedSecondaryIds,
+  getDefaultHierarchyColumnWidth,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
+  getSecondaryNodeTriState,
   getStarterHierarchyNodesForId,
   getStarterOutlineForConfig,
   getVirtualizedAutocompleteWindow,
   getVisibleHierarchyModalNodes,
+  getVisibleSecondaryFilterModalNodes,
   getVisibleSecondaryHierarchyNodes,
   isCustomCalculationsConfig,
   isLookerAdminUser,
@@ -55,9 +61,11 @@ import {
   STARTER_OUTLINE_QUERY_RESPONSE,
   toggleHierarchyNodeTriState,
   toggleSecondaryHierarchyNode,
+  toggleSecondaryNodeTriState,
   unflattenStringsJsonToConfig,
   validateLookBaseSettings,
 } from "../src/essbaseEngine";
+import { LookBaseSecondaryFilterModal } from "../src/LookBaseHierarchyModal";
 import {
   getLookBaseGuides,
   getLookBaseTourSteps,
@@ -1793,6 +1801,157 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
       "category",
       "department",
     ]);
+  });
+
+  test("expands default widths on left-hand hierarchy columns and supports full ragged hierarchy filtering on Secondary Dimensions", () => {
+    // 1. Default widths for Primary Hierarchy (Col A = 300px) and Secondary Hierarchy (Col B = 260px), plus custom user-dragged overrides
+    expect(getDefaultHierarchyColumnWidth(0)).toBe(DEFAULT_PRIMARY_HIERARCHY_COL_WIDTH);
+    expect(getDefaultHierarchyColumnWidth(1)).toBe(DEFAULT_SECONDARY_HIERARCHY_COL_WIDTH);
+    expect(
+      getDefaultHierarchyColumnWidth(0, { __primary__: 380, brand: 310 }, "__primary__"),
+    ).toBe(380);
+    expect(
+      getDefaultHierarchyColumnWidth(1, { __primary__: 380, brand: 310 }, "brand"),
+    ).toBe(310);
+
+    // 2. Full Ragged Hierarchy Tree & Tri-State Checkbox Filtering on Secondary Dimension (Brand)
+    const brandBreakdownDim = {
+      id: "brand",
+      label: "Brand",
+      fieldName: "long_metrics.brand",
+      allLabel: "All Brands",
+    };
+
+    const rows = [
+      {
+        "dim_product_hierarchy.member_id": { value: "ALL" },
+        "dim_product_hierarchy.parent_id": { value: "ROOT" },
+        "dim_product_hierarchy.member_label": { value: "Total IHG" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG" },
+        "dim_product_hierarchy.level_num": { value: 0 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "Holiday Inn" },
+        "long_metrics.brand_collection": { value: "Essentials" },
+        "long_metrics.total_sale_price": { value: 100000, rendered: "$100,000" },
+      },
+      {
+        "dim_product_hierarchy.member_id": { value: "ALL" },
+        "dim_product_hierarchy.parent_id": { value: "ROOT" },
+        "dim_product_hierarchy.member_label": { value: "Total IHG" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG" },
+        "dim_product_hierarchy.level_num": { value: 0 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "Holiday Inn Express" },
+        "long_metrics.brand_collection": { value: "Essentials" },
+        "long_metrics.total_sale_price": { value: 150000, rendered: "$150,000" },
+      },
+      {
+        "dim_product_hierarchy.member_id": { value: "ALL" },
+        "dim_product_hierarchy.parent_id": { value: "ROOT" },
+        "dim_product_hierarchy.member_label": { value: "Total IHG" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG" },
+        "dim_product_hierarchy.level_num": { value: 0 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "InterContinental" },
+        "long_metrics.brand_collection": { value: "Luxury & Lifestyle" },
+        "long_metrics.total_sale_price": { value: 220000, rendered: "$220,000" },
+      },
+      {
+        "dim_product_hierarchy.member_id": { value: "ALL" },
+        "dim_product_hierarchy.parent_id": { value: "ROOT" },
+        "dim_product_hierarchy.member_label": { value: "Total IHG" },
+        "dim_product_hierarchy.member_path": { value: "Total IHG" },
+        "dim_product_hierarchy.level_num": { value: 0 },
+        "dim_product_hierarchy.is_leaf": { value: "No" },
+        "long_metrics.brand": { value: "Six Senses" },
+        "long_metrics.brand_collection": { value: "Luxury & Lifestyle" },
+        "long_metrics.total_sale_price": { value: 80000, rendered: "$80,000" },
+      },
+    ];
+
+    const brandTree = buildSecondaryHierarchyTree(brandBreakdownDim, rows, pcConfig);
+    const totalNode = brandTree.find((n) => n.id === "BR:TOTAL")!;
+    const essentialsNode = brandTree.find((n) => n.id === "BR:COLL:Essentials")!;
+    const hiLeaf = brandTree.find((n) => n.id === "BR:LEAF:Holiday Inn")!;
+    const icLeaf = brandTree.find((n) => n.id === "BR:LEAF:InterContinental")!;
+
+    // Default (undefined selectedNodeIds) -> all nodes are "all"
+    expect(getSecondaryNodeTriState(totalNode, brandTree, undefined)).toBe("all");
+    expect(getSecondaryNodeTriState(essentialsNode, brandTree, undefined)).toBe("all");
+
+    // Start from Select None ([]), then select ONLY "Holiday Inn" ($100k) and "InterContinental" ($220k)
+    let selectedIds = toggleSecondaryNodeTriState(hiLeaf, brandTree, []);
+    selectedIds = toggleSecondaryNodeTriState(icLeaf, brandTree, selectedIds);
+
+    // Essentials has 2 leaves (Holiday Inn, Holiday Inn Express) -> 1 selected => "some" (indeterminate)
+    expect(getSecondaryNodeTriState(essentialsNode, brandTree, selectedIds)).toBe("some");
+    expect(getSecondaryNodeTriState(hiLeaf, brandTree, selectedIds)).toBe("all");
+    expect(getSecondaryNodeTriState(totalNode, brandTree, selectedIds)).toBe("some");
+
+    // Project with selectedSecondaryNodeIds: { brand: selectedIds }
+    const projectedFiltered = projectOutlineRowsToReportTable(
+      rows,
+      baseQueryResponse,
+      pcConfig,
+      4,
+      undefined,
+      brandBreakdownDim,
+      {
+        expandedPrimaryMemberIds: [],
+        selectedSecondaryNodeIds: { brand: selectedIds },
+      },
+    );
+
+    // Ancestor branches of the selected brands auto-expand, non-selected branches (Six Senses, Other Brands, Holiday Inn Express) are filtered out,
+    // AND parent rollups (Total Brands, Hotel Brands, Essentials) dynamically aggregate ONLY the selected brands ($100k + $220k = $320k)!
+    expect(
+      projectedFiltered.queryResponse.data.map((r: any) => ({
+        brand: r["long_metrics.brand"]?.value,
+        sales: r["long_metrics.total_sale_price"]?.rendered,
+      })),
+    ).toEqual([
+      { brand: "Total Brands", sales: "$320,000" },
+      { brand: "Hotel Brands", sales: "$320,000" },
+      { brand: "Hotel Brands excl Six Senses", sales: "$320,000" },
+      { brand: "Essentials", sales: "$100,000" },
+      { brand: "Holiday Inn", sales: "$100,000" },
+      { brand: "Luxury & Lifestyle", sales: "$220,000" },
+      { brand: "InterContinental", sales: "$220,000" },
+    ]);
+
+    // Search in Secondary Filter Modal returns matching leaf + its full ancestor chain
+    const searchedNodes = getVisibleSecondaryFilterModalNodes(
+      brandTree,
+      ["BR:TOTAL"],
+      "Holiday Inn Express",
+    );
+    expect(searchedNodes.map((n) => n.id)).toEqual([
+      "BR:TOTAL",
+      "BR:HOTEL_BRANDS",
+      "BR:HOTEL_EXCL_SX",
+      "BR:COLL:Essentials",
+      "BR:LEAF:Holiday Inn Express",
+    ]);
+
+    // Render LookBaseSecondaryFilterModal to verify full ragged hierarchy UI
+    const modalHtml = renderToString(
+      React.createElement(LookBaseSecondaryFilterModal, {
+        isOpen: true,
+        onClose: () => {},
+        dimDef: brandBreakdownDim,
+        tree: brandTree,
+        selectedNodeIds: selectedIds,
+        onChangeSelectedNodeIds: () => {},
+        unfoldedIds: getAllSecondaryNodeIds(brandTree),
+        setUnfoldedIds: () => {},
+        searchQuery: "",
+        setSearchQuery: () => {},
+      }),
+    );
+    expect(modalHtml).toContain("Column Hierarchy Filter — Brand");
+    expect(modalHtml).toContain("Hotel Brands excl Six Senses");
+    expect(modalHtml).toContain("Holiday Inn");
+    expect(modalHtml).toContain("InterContinental");
   });
 });
 

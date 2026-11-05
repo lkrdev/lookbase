@@ -2931,6 +2931,28 @@ export interface MultiHierarchyRowMeta {
 export interface MultiHierarchyOptions {
   expandedPrimaryMemberIds?: string[];
   expandedSecondaryIds?: Record<string, string[]>;
+  selectedSecondaryNodeIds?: Record<string, string[]>;
+}
+
+export const DEFAULT_PRIMARY_HIERARCHY_COL_WIDTH = 300;
+export const DEFAULT_SECONDARY_HIERARCHY_COL_WIDTH = 260;
+export const MIN_RESIZABLE_COL_WIDTH = 90;
+
+export function getDefaultHierarchyColumnWidth(
+  colIndex: number,
+  customWidths?: Record<string, number>,
+  colKey?: string,
+): number {
+  if (colKey && customWidths && typeof customWidths[colKey] === "number") {
+    return Math.max(MIN_RESIZABLE_COL_WIDTH, Math.round(customWidths[colKey]));
+  }
+  const idxKey = `col_${colIndex}`;
+  if (customWidths && typeof customWidths[idxKey] === "number") {
+    return Math.max(MIN_RESIZABLE_COL_WIDTH, Math.round(customWidths[idxKey]));
+  }
+  return colIndex === 0
+    ? DEFAULT_PRIMARY_HIERARCHY_COL_WIDTH
+    : DEFAULT_SECONDARY_HIERARCHY_COL_WIDTH;
 }
 
 export interface ProjectedOutlineResult {
@@ -3234,6 +3256,152 @@ export function toggleSecondaryHierarchyNode(
     }
   }
   return Array.from(expandedSet).filter((id) => !toRemove.has(id));
+}
+
+/**
+ * Returns all node IDs in a secondary ragged hierarchy tree (default "Select All" state).
+ */
+export function getAllSecondaryNodeIds(tree: SecondaryHierarchyNode[]): string[] {
+  return (tree || []).map((n) => n.id);
+}
+
+/**
+ * Computes the tri-state ("all" | "some" | "none") for a node in a Secondary Ragged Hierarchy tree
+ * (e.g. Brand Hierarchy `Total Brands` -> `Hotel Brands` -> `Hotel Brands excl Six Senses` -> `Suites` -> `Atwell Suites`).
+ * - When `selectedNodeIds` is `undefined`, all nodes are considered selected ("all").
+ * - When `selectedNodeIds` is an array (including `[]` for Select None), evaluates how many leaf nodes
+ *   in this node's subtree are selected.
+ */
+export function getSecondaryNodeTriState(
+  node: SecondaryHierarchyNode,
+  tree: SecondaryHierarchyNode[],
+  selectedNodeIds?: string[],
+): HierarchyTriState {
+  if (selectedNodeIds === undefined) return "all";
+  const selectedSet = new Set(selectedNodeIds);
+  if (selectedSet.size === 0) return "none";
+
+  const byId = new Map<string, SecondaryHierarchyNode>();
+  for (const n of tree) byId.set(n.id, n);
+
+  const isDescendantOrSelf = (candidate: SecondaryHierarchyNode, rootId: string): boolean => {
+    let curr: SecondaryHierarchyNode | undefined = candidate;
+    while (curr) {
+      if (curr.id === rootId) return true;
+      curr = curr.parentId ? byId.get(curr.parentId) : undefined;
+    }
+    return false;
+  };
+
+  if (node.isLeaf) {
+    return selectedSet.has(node.id) ? "all" : "none";
+  }
+
+  const subtreeLeaves = tree.filter((n) => n.isLeaf && isDescendantOrSelf(n, node.id));
+  if (subtreeLeaves.length === 0) {
+    return selectedSet.has(node.id) ? "all" : "none";
+  }
+
+  const selectedLeafCount = subtreeLeaves.filter((l) => selectedSet.has(l.id)).length;
+  if (selectedLeafCount === 0) return "none";
+  if (selectedLeafCount === subtreeLeaves.length) return "all";
+  return "some";
+}
+
+/**
+ * Toggles a node (leaf or parent rollup) in a Secondary Ragged Hierarchy tree filter:
+ * - Toggling a parent node (e.g. `Suites` or `Luxury & Lifestyle`) selects or deselects all of its
+ *   descendant nodes and leaf brands, and synchronizes ancestor rollup IDs.
+ * - Toggling a leaf node (e.g. `Holiday Inn` or `Atwell Suites`) selects or deselects that leaf
+ *   and keeps ancestor rollup nodes included whenever at least one descendant leaf is selected.
+ */
+export function toggleSecondaryNodeTriState(
+  node: SecondaryHierarchyNode,
+  tree: SecondaryHierarchyNode[],
+  selectedNodeIds?: string[],
+  targetState?: HierarchyTriState,
+): string[] {
+  const byId = new Map<string, SecondaryHierarchyNode>();
+  for (const n of tree) byId.set(n.id, n);
+
+  const isDescendantOrSelf = (candidate: SecondaryHierarchyNode, rootId: string): boolean => {
+    let curr: SecondaryHierarchyNode | undefined = candidate;
+    while (curr) {
+      if (curr.id === rootId) return true;
+      curr = curr.parentId ? byId.get(curr.parentId) : undefined;
+    }
+    return false;
+  };
+
+  const currentSet = new Set<string>(
+    selectedNodeIds === undefined ? getAllSecondaryNodeIds(tree) : selectedNodeIds,
+  );
+  const currentTri = getSecondaryNodeTriState(node, tree, Array.from(currentSet));
+  const nextTri: HierarchyTriState = targetState
+    ? targetState
+    : currentTri === "all"
+      ? "none"
+      : "all";
+
+  const subtreeNodes = tree.filter((n) => isDescendantOrSelf(n, node.id));
+  if (nextTri === "none") {
+    for (const sn of subtreeNodes) {
+      currentSet.delete(sn.id);
+    }
+  } else {
+    for (const sn of subtreeNodes) {
+      currentSet.add(sn.id);
+    }
+  }
+
+  // Reconcile non-leaf ancestor/branch nodes bottom-up: a non-leaf node stays in currentSet iff >= 1 descendant leaf is selected
+  const allLeaves = tree.filter((n) => n.isLeaf);
+  for (const branch of tree) {
+    if (branch.isLeaf) continue;
+    const branchLeaves = allLeaves.filter((l) => isDescendantOrSelf(l, branch.id));
+    if (branchLeaves.length > 0) {
+      const hasAnyLeaf = branchLeaves.some((l) => currentSet.has(l.id));
+      if (hasAnyLeaf) {
+        currentSet.add(branch.id);
+      } else {
+        currentSet.delete(branch.id);
+      }
+    }
+  }
+
+  return tree.filter((n) => currentSet.has(n.id)).map((n) => n.id);
+}
+
+/**
+ * Returns the visible nodes in a Secondary Ragged Hierarchy Filter Modal given `unfoldedIds` and `searchQuery`.
+ * - When `searchQuery` is non-empty, returns all matching nodes plus their ancestor chain and immediate children of matched branches.
+ * - Otherwise, returns nodes whose ancestor chain is unfolded in `unfoldedIds`.
+ */
+export function getVisibleSecondaryFilterModalNodes(
+  tree: SecondaryHierarchyNode[],
+  unfoldedIds: string[],
+  searchQuery = "",
+): SecondaryHierarchyNode[] {
+  const byId = new Map<string, SecondaryHierarchyNode>();
+  for (const n of tree) byId.set(n.id, n);
+
+  const q = (searchQuery || "").trim().toLowerCase();
+  if (q) {
+    const matchedIds = new Set<string>();
+    for (const n of tree) {
+      if (`${n.label} ${n.id}`.toLowerCase().includes(q)) {
+        matchedIds.add(n.id);
+        let currParent = n.parentId;
+        while (currParent) {
+          matchedIds.add(currParent);
+          currParent = byId.get(currParent)?.parentId ?? null;
+        }
+      }
+    }
+    return tree.filter((n) => matchedIds.has(n.id));
+  }
+
+  return getVisibleSecondaryHierarchyNodes(tree, unfoldedIds);
 }
 
 /**
@@ -3584,18 +3752,59 @@ export function projectOutlineRowsToReportTable(
     const secDimExecution = secondaryDims.map((d) => {
       const tree = buildSecondaryHierarchyTree(d, outlineRows, pcConfig);
       secondaryTrees[d.id] = tree;
-      const expIds =
+      const rawSelectedIds = multiHierarchyOptions?.selectedSecondaryNodeIds?.[d.id];
+      const hasExplicitFilter = Array.isArray(rawSelectedIds);
+      const selectedNodeSet = hasExplicitFilter ? new Set(rawSelectedIds!) : null;
+
+      // Auto-expand ancestor branches of selected nodes when a filter is active on this dimension
+      const baseExpIds =
         multiHierarchyOptions?.expandedSecondaryIds?.[d.id] ??
         getDefaultExpandedSecondaryIds(d, tree);
+      const effectiveExpSet = new Set(baseExpIds);
+      if (selectedNodeSet) {
+        const byId = new Map<string, SecondaryHierarchyNode>();
+        for (const sn of tree) byId.set(sn.id, sn);
+        for (const sn of tree) {
+          if (selectedNodeSet.has(sn.id)) {
+            let currParent = sn.parentId;
+            while (currParent) {
+              effectiveExpSet.add(currParent);
+              currParent = byId.get(currParent)?.parentId ?? null;
+            }
+          }
+        }
+      }
+      const expIds = Array.from(effectiveExpSet);
       const expSet = new Set(expIds);
-      const visNodes = getVisibleSecondaryHierarchyNodes(tree, expIds);
+      const rawVisNodes = getVisibleSecondaryHierarchyNodes(tree, expIds);
+      const visNodes = selectedNodeSet
+        ? rawVisNodes.filter((sn) => selectedNodeSet.has(sn.id))
+        : rawVisNodes;
+
+      // Allowed leaf values when a filter is active (intersects each rollup node's leafValues with selected leaves)
+      const allowedLeafSet = selectedNodeSet
+        ? new Set(
+            tree
+              .filter((sn) => sn.isLeaf && selectedNodeSet.has(sn.id))
+              .flatMap((sn) => sn.leafValues),
+          )
+        : null;
+
       return {
         dimDef: d,
         tree,
         expSet,
         visNodes,
+        allowedLeafSet,
         leafSetByNodeId: new Map<string, Set<string>>(
-          tree.map((sn) => [sn.id, new Set(sn.leafValues)]),
+          tree.map((sn) => [
+            sn.id,
+            new Set(
+              allowedLeafSet
+                ? sn.leafValues.filter((lv) => allowedLeafSet.has(lv))
+                : sn.leafValues,
+            ),
+          ]),
         ),
       };
     });
@@ -3626,9 +3835,10 @@ export function projectOutlineRowsToReportTable(
       for (const secTuple of secTuples) {
         const matchingRows = candidateRows.filter((r) =>
           secTuple.every((sn, idx) => {
-            if (sn.matchAll) return true;
-            const val = readSecondaryVal(r, secDimExecution[idx].dimDef, pNode);
-            return secDimExecution[idx].leafSetByNodeId.get(sn.id)?.has(val) ?? false;
+            const sec = secDimExecution[idx];
+            if (sn.matchAll && !sec.allowedLeafSet) return true;
+            const val = readSecondaryVal(r, sec.dimDef, pNode);
+            return sec.leafSetByNodeId.get(sn.id)?.has(val) ?? false;
           }),
         );
 

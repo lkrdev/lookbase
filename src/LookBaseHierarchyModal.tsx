@@ -3,15 +3,23 @@ import {
   CalculationsConfig,
   deriveExpandedPathsFromMemberIds,
   fetchHierarchyModalChildren,
+  getAllSecondaryNodeIds,
+  getDefaultExpandedSecondaryIds,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
+  getSecondaryNodeTriState,
   getVisibleHierarchyModalNodes,
+  getVisibleSecondaryFilterModalNodes,
+  LookBaseBreakdownDimensionDef,
   LookBaseHierarchyDef,
   OutlineNodeMeta,
   ParentChildHierarchyConfig,
+  SecondaryHierarchyNode,
   sortOutlineNodesTreeOrder,
   toggleHierarchyNodeTriState,
+  toggleSecondaryHierarchyNode,
+  toggleSecondaryNodeTriState,
 } from "./essbaseEngine";
 
 export interface LookBaseHierarchyModalProps {
@@ -543,6 +551,322 @@ export const LookBaseHierarchyModal: React.FC<LookBaseHierarchyModalProps> = ({
               }}
             >
               Run Consolidated Batch Query Now
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export interface LookBaseSecondaryFilterModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  dimDef: LookBaseBreakdownDimensionDef | null;
+  tree: SecondaryHierarchyNode[];
+  selectedNodeIds?: string[];
+  onChangeSelectedNodeIds: (dimId: string, nextIds?: string[]) => void;
+  unfoldedIds: string[];
+  setUnfoldedIds: React.Dispatch<React.SetStateAction<string[]>>;
+  searchQuery: string;
+  setSearchQuery: React.Dispatch<React.SetStateAction<string>>;
+}
+
+export const LookBaseSecondaryFilterModal: React.FC<LookBaseSecondaryFilterModalProps> = ({
+  isOpen,
+  onClose,
+  dimDef,
+  tree,
+  selectedNodeIds,
+  onChangeSelectedNodeIds,
+  unfoldedIds,
+  setUnfoldedIds,
+  searchQuery,
+  setSearchQuery,
+}) => {
+  if (!isOpen || !dimDef) return null;
+
+  const maxLevel = tree.reduce((acc, n) => Math.max(acc, n.level), 0);
+  const allLeafNodes = tree.filter((n) => n.isLeaf);
+  const selectedLeafCount =
+    selectedNodeIds === undefined
+      ? allLeafNodes.length
+      : allLeafNodes.filter((n) => selectedNodeIds.includes(n.id)).length;
+
+  return (
+    <div
+      className="lookbase-modal-backdrop"
+      data-testid="secondary-filter-modal-backdrop"
+      onClick={onClose}
+    >
+      <div
+        className="lookbase-modal"
+        data-testid={`secondary-filter-modal-${dimDef.id}`}
+        style={{ maxWidth: 640 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="lookbase-modal-header">
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a" }}>
+              {`Column Hierarchy Filter — ${dimDef.label}`}
+            </div>
+            <div style={{ fontSize: 11, color: "#475569" }}>
+              Dimension: <strong>{dimDef.label}</strong> (<code>{dimDef.fieldName}</code>) ·{" "}
+              {selectedLeafCount} of {allLeafNodes.length} leaf members selected ({tree.length}{" "}
+              total hierarchy nodes)
+            </div>
+          </div>
+          <button className="lookbase-btn" onClick={onClose} aria-label="Close dimension filter">
+            ✕
+          </button>
+        </div>
+
+        <div className="lookbase-modal-body">
+          {/* Level Quick-Pills (Unfold Ragged Hierarchy Levels L0..LN) */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 6,
+              marginBottom: 8,
+              fontSize: 11,
+            }}
+          >
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+              <span style={{ fontWeight: 600, color: "#334155" }}>Unfold Level:</span>
+              {Array.from({ length: maxLevel + 1 }, (_, lvlIdx) => (
+                <button
+                  key={`sec-lvl-pill-${lvlIdx}`}
+                  type="button"
+                  className="lookbase-btn"
+                  data-testid={`sec-filter-level-pill-${lvlIdx}`}
+                  onClick={() => {
+                    const parentIdsUpToLevel = tree
+                      .filter((n) => !n.isLeaf && n.level < lvlIdx)
+                      .map((n) => n.id);
+                    setUnfoldedIds(parentIdsUpToLevel);
+                  }}
+                  title={`Unfold ${dimDef.label} hierarchy down to Level ${lvlIdx}`}
+                >
+                  L{lvlIdx}
+                </button>
+              ))}
+              <button
+                type="button"
+                className="lookbase-btn"
+                data-testid="sec-filter-expand-all-tree"
+                onClick={() =>
+                  setUnfoldedIds(tree.filter((n) => !n.isLeaf).map((n) => n.id))
+                }
+              >
+                Expand All Levels
+              </button>
+            </div>
+          </div>
+
+          {/* Search & Bulk Selection Controls */}
+          <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
+            <input
+              className="lookbase-autocomplete-input"
+              data-testid="secondary-filter-search-input"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={`Search ${dimDef.label} levels & members...`}
+            />
+            <button
+              type="button"
+              className="lookbase-btn"
+              data-testid="secondary-filter-select-all"
+              title="Select all branches and leaf members"
+              onClick={() => onChangeSelectedNodeIds(dimDef.id, undefined)}
+            >
+              Select All
+            </button>
+            <button
+              type="button"
+              className="lookbase-btn"
+              data-testid="secondary-filter-select-none"
+              title="Clear all selections"
+              onClick={() => onChangeSelectedNodeIds(dimDef.id, [])}
+            >
+              Select None
+            </button>
+          </div>
+
+          {/* Ragged Hierarchy Tree Container */}
+          <div
+            data-testid="secondary-filter-tree-scroll"
+            style={{
+              maxHeight: 340,
+              overflowY: "auto",
+              border: "1px solid #cbd5e1",
+              position: "relative",
+            }}
+          >
+            {(() => {
+              const visibleNodes = getVisibleSecondaryFilterModalNodes(
+                tree,
+                unfoldedIds,
+                searchQuery,
+              );
+              const childrenByParent: Record<string, SecondaryHierarchyNode[]> = {};
+              const roots: SecondaryHierarchyNode[] = [];
+
+              for (const n of visibleNodes) {
+                if (!n.parentId) {
+                  roots.push(n);
+                } else {
+                  if (!childrenByParent[n.parentId]) {
+                    childrenByParent[n.parentId] = [];
+                  }
+                  childrenByParent[n.parentId].push(n);
+                }
+              }
+
+              const renderRow = (node: SecondaryHierarchyNode) => {
+                const triState = getSecondaryNodeTriState(node, tree, selectedNodeIds);
+                const stickyStyle = getHierarchyRowStickyStyle(node.level, 30);
+                const isUnfolded =
+                  Boolean(searchQuery.trim()) || unfoldedIds.includes(node.id);
+
+                return (
+                  <div
+                    key={`sec-row:${node.id}`}
+                    data-sec-tree-row={node.id}
+                    data-level={node.level}
+                    style={{
+                      ...stickyStyle,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "0 8px",
+                      paddingLeft: 8 + getOutlineIndentationPx(node.level, 16),
+                      borderBottom: "1px solid #e2e8f0",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {!node.isLeaf ? (
+                        <button
+                          type="button"
+                          data-sec-tree-chevron={node.id}
+                          onClick={() =>
+                            setUnfoldedIds((prev) =>
+                              toggleSecondaryHierarchyNode(tree, prev, node.id),
+                            )
+                          }
+                          style={{
+                            width: 18,
+                            height: 18,
+                            padding: 0,
+                            border: "1px solid #cbd5e1",
+                            borderRadius: 3,
+                            background: isUnfolded ? "#eff6ff" : "#ffffff",
+                            color: "#334155",
+                            fontSize: 10,
+                            lineHeight: "16px",
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                          title={isUnfolded ? `Collapse ${node.label}` : `Expand ${node.label}`}
+                        >
+                          {isUnfolded ? "▾" : "▸"}
+                        </button>
+                      ) : (
+                        <span style={{ width: 18, display: "inline-block" }} />
+                      )}
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          data-sec-tree-checkbox={node.id}
+                          checked={triState === "all"}
+                          ref={(el) => {
+                            if (el) {
+                              el.indeterminate = triState === "some";
+                            }
+                          }}
+                          onChange={() => {
+                            const nextIds = toggleSecondaryNodeTriState(
+                              node,
+                              tree,
+                              selectedNodeIds,
+                            );
+                            const allIds = getAllSecondaryNodeIds(tree);
+                            onChangeSelectedNodeIds(
+                              dimDef.id,
+                              nextIds.length >= allIds.length ? undefined : nextIds,
+                            );
+                          }}
+                        />
+                        <span style={{ fontWeight: node.isLeaf ? 400 : 600 }}>
+                          {node.label}
+                        </span>
+                      </label>
+                    </div>
+                    <span style={{ fontSize: 10, color: "#64748b" }}>
+                      {node.isLeaf ? "Leaf" : `L${node.level} (${node.leafValues.length})`}
+                    </span>
+                  </div>
+                );
+              };
+
+              const renderBranch = (node: SecondaryHierarchyNode): React.ReactNode => {
+                const visibleChildren = childrenByParent[node.id] || [];
+                if (node.isLeaf || visibleChildren.length === 0) {
+                  return renderRow(node);
+                }
+                return (
+                  <div
+                    key={`sec-branch:${node.id}`}
+                    data-sec-tree-branch={node.id}
+                    data-level={node.level}
+                  >
+                    {renderRow(node)}
+                    <div data-sec-tree-children={node.id}>
+                      {visibleChildren.map((child) => renderBranch(child))}
+                    </div>
+                  </div>
+                );
+              };
+
+              return roots.length > 0
+                ? roots.map((r) => renderBranch(r))
+                : visibleNodes.map((n) => renderRow(n));
+            })()}
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginTop: 10,
+            }}
+          >
+            <span style={{ fontSize: 11, color: "#475569" }}>
+              Selected members:{" "}
+              <strong>
+                {selectedNodeIds === undefined
+                  ? `All (${allLeafNodes.length})`
+                  : `${selectedLeafCount} of ${allLeafNodes.length}`}
+              </strong>
+            </span>
+            <button
+              type="button"
+              className="lookbase-btn primary"
+              data-testid="secondary-filter-apply-btn"
+              onClick={onClose}
+            >
+              Apply Filter
             </button>
           </div>
         </div>

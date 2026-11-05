@@ -376,6 +376,57 @@ body {
   border: 1px solid #8ea9db !important;
   font-weight: 700 !important;
   padding: 4px 8px !important;
+  box-sizing: border-box !important;
+}
+
+.lookbase-grid-area #reportTable tbody td {
+  box-sizing: border-box !important;
+}
+
+.lookbase-col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 35;
+  user-select: none;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.lookbase-col-resizer:hover,
+.lookbase-col-resizer.resizing {
+  background: rgba(29, 78, 216, 0.55);
+}
+
+.lookbase-col-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  border: 1px solid #8ea9db;
+  background: rgba(255, 255, 255, 0.78);
+  color: #1e3a8a;
+  cursor: pointer;
+  line-height: 1;
+  vertical-align: middle;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.lookbase-col-filter-btn:hover {
+  background: #ffffff;
+  border-color: #1d4ed8;
+  color: #1d4ed8;
+}
+
+.lookbase-col-filter-btn.active {
+  background: #1d4ed8;
+  border-color: #1e40af;
+  color: #ffffff;
 }
 
 .lookbase-grid-area #reportTable tbody td.dimension {

@@ -40,6 +40,7 @@ import {
   formatTimeframeLabel,
   formatTimeframeShortLabel,
   getDefaultExpandedSecondaryIds,
+  getDefaultHierarchyColumnWidth,
   getHierarchyNodeTriState,
   getHierarchyRowStickyStyle,
   getOutlineIndentationPx,
@@ -59,6 +60,7 @@ import {
   LookBaseSettingsConfig,
   LookBaseUrlState,
   mergeOutlineRows,
+  MIN_RESIZABLE_COL_WIDTH,
   normalizeLookBaseSettings,
   normalizeQueryResponseFields,
   normalizeSourceAndTimeframe,
@@ -94,7 +96,7 @@ import {
 import driverStyles from "driver.js/dist/driver.css";
 import styles from "./essbaseTheme.css";
 import { LookBaseHeaderBars } from "./LookBaseHeaderBars";
-import { LookBaseHierarchyModal } from "./LookBaseHierarchyModal";
+import { LookBaseHierarchyModal, LookBaseSecondaryFilterModal } from "./LookBaseHierarchyModal";
 import { LookBaseLeftMetricsPane } from "./LookBaseLeftMetricsPane";
 import { LookBaseSettingsModal } from "./LookBaseSettingsModal";
 import {
@@ -531,6 +533,30 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   const [expandedSecondaryNodeIds, setExpandedSecondaryNodeIds] = useState<
     Record<string, string[]>
   >({});
+  const [selectedSecondaryNodeIds, setSelectedSecondaryNodeIds] = useState<
+    Record<string, string[] | undefined>
+  >({});
+  const [activeFilterBreakdownDimId, setActiveFilterBreakdownDimId] = useState<string | null>(
+    null,
+  );
+  const [secondaryFilterUnfoldedIds, setSecondaryFilterUnfoldedIds] = useState<string[]>([]);
+  const [secondaryFilterSearch, setSecondaryFilterSearch] = useState<string>("");
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const raw = window.localStorage.getItem("lookbase_column_widths");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object") return parsed;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return {};
+  });
+  const columnWidthsRef = useRef<Record<string, number>>(columnWidths);
+  columnWidthsRef.current = columnWidths;
 
   const availableGridMeasures = useMemo<LookBaseMeasureDef[]>(() => {
     if (Array.isArray(calcConfig.measures) && calcConfig.measures.length > 0) {
@@ -655,6 +681,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       {
         expandedPrimaryMemberIds: savedExpandedMemberIds,
         expandedSecondaryIds: expandedSecondaryNodeIds,
+        selectedSecondaryNodeIds: selectedSecondaryNodeIds as Record<string, string[]>,
       },
     );
   }, [
@@ -666,6 +693,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     activeHierarchyDef,
     activeBreakdownDims,
     expandedSecondaryNodeIds,
+    selectedSecondaryNodeIds,
   ]);
 
   const effectiveQueryResponse: QueryResponse | undefined = useMemo(() => {
@@ -2009,12 +2037,29 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     [effectiveVisConfig, expandedPaths, projectedOutline, hasMultiHierarchy],
   );
 
-  // Sync collapsed row visibility or decorate in-column Multi-Hierarchy cells immediately after buildReportTable finishes
+  const handleOpenSecondaryFilterModal = useCallback(
+    (dimId: string) => {
+      if (dimId === "__primary__") {
+        setIsHierarchyModalOpen(true);
+        return;
+      }
+      const dimDef = activeBreakdownDims.find((d) => d.id === dimId || d.fieldName === dimId);
+      if (!dimDef) return;
+      const tree = projectedOutline?.secondaryTrees?.[dimDef.id] || [];
+      setActiveFilterBreakdownDimId(dimDef.id);
+      setSecondaryFilterSearch("");
+      setSecondaryFilterUnfoldedIds(getDefaultExpandedSecondaryIds(dimDef, tree));
+    },
+    [activeBreakdownDims, projectedOutline],
+  );
+
+  // Sync collapsed row visibility, default/custom column widths, drag-to-resize handles, and column header filter icons
   const syncCollapsedRowsDom = useCallback(() => {
     const el = gridWrapperRef.current;
     if (!el) return;
     const rows = Array.from(el.querySelectorAll("#reportTable tbody tr")) as HTMLElement[];
     const multiMeta = projectedOutline?.multiHierarchyRowMeta;
+    const numHierarchyCols = 1 + (projectedOutline?.secondaryDimensions?.length || 0);
 
     if (multiMeta && multiMeta.length > 0) {
       rows.forEach((tr, rowIdx) => {
@@ -2076,29 +2121,266 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
           }
         }
       });
-      return;
+    } else {
+      const collapsedPaths = rows
+        .filter((r) => r.classList.contains("subtotal") && r.classList.contains("collapsed"))
+        .map((r) => r.getAttribute("data-subtotal-path") || "")
+        .filter(Boolean);
+      for (const tr of rows) {
+        const trPath = tr.getAttribute("data-subtotal-path") || "";
+        const isHidden =
+          Boolean(trPath) &&
+          collapsedPaths.some(
+            (cp) =>
+              trPath.startsWith(cp + "|") ||
+              (trPath === cp && tr.classList.contains("line_item")),
+          );
+        tr.style.display = isHidden ? "none" : "";
+      }
     }
 
-    const collapsedPaths = rows
-      .filter((r) => r.classList.contains("subtotal") && r.classList.contains("collapsed"))
-      .map((r) => r.getAttribute("data-subtotal-path") || "")
-      .filter(Boolean);
-    for (const tr of rows) {
-      const trPath = tr.getAttribute("data-subtotal-path") || "";
-      const isHidden =
-        Boolean(trPath) &&
-        collapsedPaths.some(
-          (cp) =>
-            trPath.startsWith(cp + "|") ||
-            (trPath === cp && tr.classList.contains("line_item")),
-        );
-      tr.style.display = isHidden ? "none" : "";
-    }
-  }, [projectedOutline]);
+    // Apply expanded default widths + custom user-dragged column widths + column header filter icons + resize handles
+    const tableEl = el.querySelector("#reportTable") as HTMLTableElement | null;
+    if (!tableEl) return;
+
+    const cols = Array.from(tableEl.querySelectorAll("colgroup col")) as HTMLElement[];
+    const allTrs = Array.from(tableEl.querySelectorAll("tr")) as HTMLTableRowElement[];
+
+    // Map each table cell to its starting physical column index (accounting for rowSpan & colSpan)
+    const cellToColIdx = new Map<HTMLElement, number>();
+    const leafHeaderByColIdx = new Map<number, HTMLTableCellElement>();
+    const rowSpans: Record<number, number> = {};
+
+    const theadTrs = Array.from(tableEl.querySelectorAll("thead tr")) as HTMLTableRowElement[];
+    theadTrs.forEach((tr, rIdx) => {
+      let c = 0;
+      Array.from(tr.children).forEach((child) => {
+        const cell = child as HTMLTableCellElement;
+        while (rowSpans[c] > 0) {
+          rowSpans[c]--;
+          c++;
+        }
+        const colSpan = cell.colSpan || 1;
+        const rowSpan = cell.rowSpan || 1;
+        cellToColIdx.set(cell, c);
+        if (rowSpan > 1) {
+          for (let s = 0; s < colSpan; s++) {
+            rowSpans[c + s] = rowSpan - 1;
+          }
+        }
+        if (colSpan === 1 && rIdx + rowSpan >= theadTrs.length) {
+          leafHeaderByColIdx.set(c, cell);
+        }
+        c += colSpan;
+      });
+    });
+
+    const tbodyTrs = Array.from(tableEl.querySelectorAll("tbody tr")) as HTMLTableRowElement[];
+    tbodyTrs.forEach((tr) => {
+      let c = 0;
+      Array.from(tr.children).forEach((child) => {
+        const cell = child as HTMLTableCellElement;
+        cellToColIdx.set(cell, c);
+        c += cell.colSpan || 1;
+      });
+    });
+
+    const getColKey = (colIdx: number): string => {
+      if (colIdx === 0) return "__primary__";
+      const secDim = projectedOutline?.secondaryDimensions?.[colIdx - 1];
+      if (secDim) return secDim.id;
+      const colEl = cols[colIdx];
+      return colEl?.id || `col_${colIdx}`;
+    };
+
+    const resolvedWidths: number[] = cols.map((_, cIdx) => {
+      const colKey = getColKey(cIdx);
+      const customW =
+        columnWidthsRef.current[colKey] ?? columnWidthsRef.current[`col_${cIdx}`];
+      if (typeof customW === "number" && Number.isFinite(customW)) {
+        return Math.max(MIN_RESIZABLE_COL_WIDTH, Math.round(customW));
+      }
+      if (cIdx < numHierarchyCols) {
+        return getDefaultHierarchyColumnWidth(cIdx, columnWidthsRef.current, colKey);
+      }
+      return 0;
+    });
+
+    const applyColumnWidthsAndStickyOffsets = () => {
+      cols.forEach((colEl, cIdx) => {
+        const w = resolvedWidths[cIdx];
+        if (w > 0) {
+          colEl.style.width = `${w}px`;
+          colEl.style.minWidth = `${w}px`;
+        }
+      });
+
+      allTrs.forEach((tr) => {
+        Array.from(tr.children).forEach((child) => {
+          const cell = child as HTMLTableCellElement;
+          const cIdx = cellToColIdx.get(cell);
+          if (cIdx === undefined) return;
+          const colSpan = cell.colSpan || 1;
+          if (colSpan === 1 && resolvedWidths[cIdx] > 0) {
+            const wPx = `${resolvedWidths[cIdx]}px`;
+            cell.style.width = wPx;
+            cell.style.minWidth = wPx;
+            cell.style.maxWidth = wPx;
+          }
+          if (cIdx < numHierarchyCols && cell.classList.contains("sticky-col")) {
+            let leftOffset = 0;
+            for (let k = 0; k < cIdx; k++) {
+              leftOffset +=
+                resolvedWidths[k] > 0
+                  ? resolvedWidths[k]
+                  : leafHeaderByColIdx.get(k)?.getBoundingClientRect().width || 240;
+            }
+            cell.style.left = `${leftOffset}px`;
+          }
+        });
+      });
+    };
+
+    applyColumnWidthsAndStickyOffsets();
+
+    // Decorate leaf header cells with:
+    // 1. Hierarchy Filter Icon button on Hierarchy Columns (Col A + Secondary Breakdown Columns B, C...)
+    // 2. Interactive Drag-to-Resize handle on the right edge of every column header
+    leafHeaderByColIdx.forEach((th, cIdx) => {
+      const colKey = getColKey(cIdx);
+      th.setAttribute("data-col-idx", String(cIdx));
+      th.setAttribute("data-col-key", colKey);
+      if (!th.classList.contains("sticky-col") && (!th.style.position || th.style.position === "static")) {
+        th.style.position = "relative";
+      }
+
+      // 1. Inject Column Header Filter Icon on Hierarchy Columns
+      if (cIdx < numHierarchyCols) {
+        const dimId =
+          cIdx === 0
+            ? "__primary__"
+            : projectedOutline?.secondaryDimensions?.[cIdx - 1]?.id || "";
+        const dimLabel =
+          cIdx === 0
+            ? activeHierarchyDef?.shortLabel || "Outline Member"
+            : projectedOutline?.secondaryDimensions?.[cIdx - 1]?.label || dimId;
+        const isFiltered =
+          dimId === "__primary__"
+            ? false
+            : Array.isArray(selectedSecondaryNodeIds[dimId]);
+
+        let filterBtn = th.querySelector(".lookbase-col-filter-btn") as HTMLButtonElement | null;
+        if (!filterBtn) {
+          filterBtn = document.createElement("button");
+          filterBtn.type = "button";
+          filterBtn.className = "lookbase-col-filter-btn";
+          filterBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`;
+          filterBtn.addEventListener("mousedown", (evt) => {
+            evt.stopPropagation();
+          });
+          filterBtn.addEventListener("click", (evt) => {
+            evt.preventDefault();
+            evt.stopPropagation();
+            const targetDim = filterBtn?.getAttribute("data-filter-dim-id") || "";
+            if (targetDim) {
+              handleOpenSecondaryFilterModal(targetDim);
+            }
+          });
+          const labelSpan = th.querySelector("span");
+          if (labelSpan && labelSpan.parentElement) {
+            labelSpan.parentElement.appendChild(filterBtn);
+          } else {
+            th.appendChild(filterBtn);
+          }
+        }
+        filterBtn.setAttribute("data-filter-dim-id", dimId);
+        filterBtn.setAttribute("data-testid", `col-header-filter-${dimId}`);
+        filterBtn.title = `Filter ${dimLabel} ragged hierarchy`;
+        if (isFiltered) {
+          filterBtn.classList.add("active");
+        } else {
+          filterBtn.classList.remove("active");
+        }
+      }
+
+      // 2. Inject Column Drag-to-Resize Handle
+      let resizer = th.querySelector(".lookbase-col-resizer") as HTMLElement | null;
+      if (!resizer) {
+        resizer = document.createElement("span");
+        resizer.className = "lookbase-col-resizer";
+        resizer.title = "Drag to resize column width";
+        resizer.addEventListener("click", (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+        });
+        resizer.addEventListener("mousedown", (evt: MouseEvent) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+          const startX = evt.clientX;
+          const startWidth =
+            resolvedWidths[cIdx] > 0
+              ? resolvedWidths[cIdx]
+              : th.getBoundingClientRect().width || getDefaultHierarchyColumnWidth(cIdx);
+          resizer?.classList.add("resizing");
+
+          const onMouseMove = (moveEvt: MouseEvent) => {
+            const deltaX = moveEvt.clientX - startX;
+            const nextWidth = Math.max(MIN_RESIZABLE_COL_WIDTH, Math.round(startWidth + deltaX));
+            resolvedWidths[cIdx] = nextWidth;
+            columnWidthsRef.current = {
+              ...columnWidthsRef.current,
+              [colKey]: nextWidth,
+              [`col_${cIdx}`]: nextWidth,
+            };
+            applyColumnWidthsAndStickyOffsets();
+          };
+
+          const onMouseUp = () => {
+            resizer?.classList.remove("resizing");
+            window.removeEventListener("mousemove", onMouseMove);
+            window.removeEventListener("mouseup", onMouseUp);
+            const finalWidth = resolvedWidths[cIdx];
+            if (finalWidth > 0) {
+              setColumnWidths((prev) => {
+                const updated = {
+                  ...prev,
+                  [colKey]: finalWidth,
+                  [`col_${cIdx}`]: finalWidth,
+                };
+                try {
+                  if (typeof window !== "undefined" && window.localStorage) {
+                    window.localStorage.setItem(
+                      "lookbase_column_widths",
+                      JSON.stringify(updated),
+                    );
+                  }
+                } catch {
+                  // ignore storage errors
+                }
+                return updated;
+              });
+            }
+          };
+
+          window.addEventListener("mousemove", onMouseMove);
+          window.addEventListener("mouseup", onMouseUp);
+        });
+        th.appendChild(resizer);
+      }
+      resizer.setAttribute("data-col-idx", String(cIdx));
+      resizer.setAttribute("data-col-key", colKey);
+      resizer.setAttribute("data-testid", `col-resizer-${colKey}`);
+    });
+  }, [
+    projectedOutline,
+    activeHierarchyDef?.shortLabel,
+    selectedSecondaryNodeIds,
+    handleOpenSecondaryFilterModal,
+  ]);
 
   useEffect(() => {
     syncCollapsedRowsDom();
-  }, [projectedOutline, syncCollapsedRowsDom]);
+  }, [projectedOutline, columnWidths, selectedSecondaryNodeIds, syncCollapsedRowsDom]);
 
   // Intercept [+] / [-] subtotal expansion to fire live child query on unexpanded member_id
   // AND save the expanded member_ids to the Looker Artifacts API so all expanded branches load together on next load
@@ -2994,6 +3276,38 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         hierarchyFilterSearch={hierarchyFilterSearch}
         setHierarchyFilterSearch={setHierarchyFilterSearch}
         savedExpandedMemberIds={savedExpandedMemberIds}
+      />
+
+      <LookBaseSecondaryFilterModal
+        isOpen={Boolean(activeFilterBreakdownDimId)}
+        onClose={() => setActiveFilterBreakdownDimId(null)}
+        dimDef={
+          activeBreakdownDims.find(
+            (d) =>
+              d.id === activeFilterBreakdownDimId ||
+              d.fieldName === activeFilterBreakdownDimId,
+          ) || null
+        }
+        tree={
+          (activeFilterBreakdownDimId &&
+            projectedOutline?.secondaryTrees?.[activeFilterBreakdownDimId]) ||
+          []
+        }
+        selectedNodeIds={
+          activeFilterBreakdownDimId
+            ? selectedSecondaryNodeIds[activeFilterBreakdownDimId]
+            : undefined
+        }
+        onChangeSelectedNodeIds={(dimId, nextIds) => {
+          setSelectedSecondaryNodeIds((prev) => ({
+            ...prev,
+            [dimId]: nextIds,
+          }));
+        }}
+        unfoldedIds={secondaryFilterUnfoldedIds}
+        setUnfoldedIds={setSecondaryFilterUnfoldedIds}
+        searchQuery={secondaryFilterSearch}
+        setSearchQuery={setSecondaryFilterSearch}
       />
 
       <LookBaseSettingsModal
