@@ -35,6 +35,7 @@ import {
   fetchFullHierarchyCatalog,
   fetchHierarchiesFromLookmlOutline,
   fetchHierarchyModalChildren,
+  filterOutHierarchyClientSorts,
   formatLookBaseValue,
   formatMonthYearLabel,
   formatTimeframeLabel,
@@ -49,6 +50,7 @@ import {
   getVirtualizedAutocompleteWindow,
   getVisibleHierarchyModalNodes,
   isCustomCalculationsConfig,
+  isHierarchyDimensionColumnId,
   isLookerAdminUser,
   loadProjectCalculations,
   LOOKBASE_SHARED_PDT_CATALOG,
@@ -2019,6 +2021,10 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     () => ({
       ...LOOKBASE_DEFAULT_VIS_CONFIG,
       ...effectiveVisConfig,
+      clientSorts: filterOutHierarchyClientSorts(
+        (effectiveVisConfig as any)?.clientSorts,
+        availableBreakdownDimensions,
+      ),
       theme: "custom",
       customTheme: "",
       exposeDownloadLink: true,
@@ -2034,7 +2040,13 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       expandSubtotals: expandedPaths.join(","),
       isExtension: true,
     }),
-    [effectiveVisConfig, expandedPaths, projectedOutline, hasMultiHierarchy],
+    [
+      effectiveVisConfig,
+      expandedPaths,
+      projectedOutline,
+      hasMultiHierarchy,
+      availableBreakdownDimensions,
+    ],
   );
 
   const handleOpenSecondaryFilterModal = useCallback(
@@ -2243,9 +2255,20 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
 
     applyColumnWidthsAndStickyOffsets();
 
+    // Clear any cached hierarchy dimension sort on the ReportTable root element
+    const visContainerEl = el.querySelector("#visContainer");
+    const rtRootEl = visContainerEl?.parentElement as any;
+    if (rtRootEl && Array.isArray(rtRootEl._clientSorts)) {
+      rtRootEl._clientSorts = filterOutHierarchyClientSorts(
+        rtRootEl._clientSorts,
+        availableBreakdownDimensions,
+      );
+    }
+
     // Decorate leaf header cells with:
-    // 1. Hierarchy Filter Icon button on Hierarchy Columns (Col A + Secondary Breakdown Columns B, C...)
-    // 2. Interactive Drag-to-Resize handle on the right edge of every column header
+    // 1. Disable alphabetical sorting & strip sort arrows on Hierarchy Columns
+    // 2. Hierarchy Filter Icon button on Hierarchy Columns (Col A + Secondary Breakdown Columns B, C...)
+    // 3. Interactive Drag-to-Resize handle on the right edge of every column header
     leafHeaderByColIdx.forEach((th, cIdx) => {
       const colKey = getColKey(cIdx);
       th.setAttribute("data-col-idx", String(cIdx));
@@ -2254,8 +2277,29 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
         th.style.position = "relative";
       }
 
-      // 1. Inject Column Header Filter Icon on Hierarchy Columns
+      // 1. Disable sorting and inject Column Header Filter Icon on Hierarchy Columns
       if (cIdx < numHierarchyCols) {
+        th.classList.add("lookbase-hier-header");
+        th.setAttribute("data-nosort", "true");
+        th.style.cursor = "default";
+        th.querySelectorAll(".sort-icon, .sort-num").forEach((node) => node.remove());
+        if (th.getAttribute("data-hier-nosort-bound") !== "1") {
+          th.setAttribute("data-hier-nosort-bound", "1");
+          th.addEventListener(
+            "click",
+            (evt: MouseEvent) => {
+              const tgt = evt.target as HTMLElement | null;
+              if (tgt?.closest(".lookbase-col-filter-btn, .lookbase-col-resizer")) {
+                return;
+              }
+              evt.preventDefault();
+              evt.stopPropagation();
+              evt.stopImmediatePropagation();
+            },
+            true,
+          );
+        }
+
         const dimId =
           cIdx === 0
             ? "__primary__"
@@ -2376,6 +2420,7 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
     activeHierarchyDef?.shortLabel,
     selectedSecondaryNodeIds,
     handleOpenSecondaryFilterModal,
+    availableBreakdownDimensions,
   ]);
 
   useEffect(() => {
@@ -2386,10 +2431,20 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
   // AND save the expanded member_ids to the Looker Artifacts API so all expanded branches load together on next load
   const handleLookBaseUpdateConfig = useCallback(
     async (partial: Partial<VisConfig>) => {
-      handleUpdateConfig(partial);
+      const sanitizedPartial: Partial<VisConfig> = { ...partial };
+      if (Array.isArray((sanitizedPartial as any).clientSorts)) {
+        (sanitizedPartial as any).clientSorts = filterOutHierarchyClientSorts(
+          (sanitizedPartial as any).clientSorts,
+          availableBreakdownDimensions,
+        );
+      }
+      handleUpdateConfig(sanitizedPartial);
+      setTimeout(() => {
+        syncCollapsedRowsDom();
+      }, 0);
 
-      if (typeof partial.expandSubtotals === "string") {
-        const nextExpanded = partial.expandSubtotals
+      if (typeof sanitizedPartial.expandSubtotals === "string") {
+        const nextExpanded = sanitizedPartial.expandSubtotals
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
@@ -2544,6 +2599,8 @@ export const LookBaseExtension: React.FC<{ host?: ExtensionSDK }> = ({ host }) =
       povYear,
       activeHierarchyId,
       activeBreakdownDims,
+      availableBreakdownDimensions,
+      syncCollapsedRowsDom,
       persistSavedExpansion,
       pushToast,
       updateToast,

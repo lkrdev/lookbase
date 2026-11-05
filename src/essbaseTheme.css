@@ -812,3 +812,16 @@ body {
 .lookbase-skeleton-table tr.skeleton-root td {
   background: #f2f5fb;
 }
+
+#reportTable th.lookbase-hier-header,
+#reportTable th[data-nosort="true"] {
+  cursor: default !important;
+}
+
+#reportTable th.lookbase-hier-header .sort-icon,
+#reportTable th.lookbase-hier-header .sort-num,
+#reportTable th[data-nosort="true"] .sort-icon,
+#reportTable th[data-nosort="true"] .sort-num {
+  display: none !important;
+}
+

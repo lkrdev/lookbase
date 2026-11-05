@@ -2955,6 +2955,57 @@ export function getDefaultHierarchyColumnWidth(
     : DEFAULT_SECONDARY_HIERARCHY_COL_WIDTH;
 }
 
+/**
+ * Returns `true` when `colId` corresponds to a Primary or Secondary Hierarchy Dimension column
+ * (where alphabetical client-side sorting must be disabled to preserve parent-child tree order).
+ */
+export function isHierarchyDimensionColumnId(
+  colId: string | undefined | null,
+  secondaryDims?: LookBaseBreakdownDimensionDef[],
+): boolean {
+  const id = String(colId || "").trim();
+  if (!id) return false;
+  if (
+    id === "$$$_index_$$$" ||
+    id === "__primary__" ||
+    id.startsWith("__lookbase_lvl_") ||
+    id.startsWith("dim_product_hierarchy.") ||
+    id.startsWith("dim_outline_hierarchy.") ||
+    id.startsWith("dim_products.")
+  ) {
+    return true;
+  }
+  const builtinFieldNames = new Set([
+    "long_metrics.brand",
+    "long_metrics.brand_collection",
+    "brand",
+    "brand_collection",
+    "category",
+    "department",
+  ]);
+  if (builtinFieldNames.has(id)) return true;
+  if (Array.isArray(secondaryDims)) {
+    for (const d of secondaryDims) {
+      if (d && (d.id === id || d.fieldName === id)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Strips any hierarchy dimension columns from a `ReportTable` `clientSorts` array
+ * while preserving user-selected measure column sorts.
+ */
+export function filterOutHierarchyClientSorts(
+  clientSorts: Array<{ name: string; desc?: boolean }> | undefined | null,
+  secondaryDims?: LookBaseBreakdownDimensionDef[],
+): Array<{ name: string; desc?: boolean }> {
+  if (!Array.isArray(clientSorts) || clientSorts.length === 0) return [];
+  return clientSorts.filter(
+    (s) => s && typeof s.name === "string" && !isHierarchyDimensionColumnId(s.name, secondaryDims),
+  );
+}
+
 export interface ProjectedOutlineResult {
   queryResponse: any;
   pathToNode: Record<string, OutlineNodeMeta>;

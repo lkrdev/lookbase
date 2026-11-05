@@ -26,6 +26,7 @@ import {
   fetchFullHierarchyCatalog,
   fetchHierarchiesFromLookmlOutline,
   fetchHierarchyModalChildren,
+  filterOutHierarchyClientSorts,
   flattenConfigToStringsJson,
   fetchOutlineChildren,
   formatEssbaseValue,
@@ -44,6 +45,7 @@ import {
   getVisibleSecondaryFilterModalNodes,
   getVisibleSecondaryHierarchyNodes,
   isCustomCalculationsConfig,
+  isHierarchyDimensionColumnId,
   isLookerAdminUser,
   loadProjectCalculations,
   mergeOutlineRows,
@@ -1952,6 +1954,33 @@ describe("LookBase Multidimensional Engine & (member_id, parent_id) Hierarchy In
     expect(modalHtml).toContain("Hotel Brands excl Six Senses");
     expect(modalHtml).toContain("Holiday Inn");
     expect(modalHtml).toContain("InterContinental");
+  });
+
+  test("23. Hierarchy Dimension Column Sort Disabling (isHierarchyDimensionColumnId & filterOutHierarchyClientSorts)", () => {
+    const customDims = [
+      { id: "region_seg", label: "Region Segment", fieldName: "long_metrics.region_seg" },
+    ];
+    expect(isHierarchyDimensionColumnId("$$$_index_$$$")).toBe(true);
+    expect(isHierarchyDimensionColumnId("__lookbase_lvl_0")).toBe(true);
+    expect(isHierarchyDimensionColumnId("dim_product_hierarchy.member_label")).toBe(true);
+    expect(isHierarchyDimensionColumnId("long_metrics.brand")).toBe(true);
+    expect(isHierarchyDimensionColumnId("long_metrics.brand_collection")).toBe(true);
+    expect(isHierarchyDimensionColumnId("long_metrics.region_seg", customDims)).toBe(true);
+    expect(isHierarchyDimensionColumnId("long_metrics.total_sale_price", customDims)).toBe(false);
+    expect(isHierarchyDimensionColumnId("Current|long_metrics.total_sale_price", customDims)).toBe(
+      false,
+    );
+
+    const rawSorts = [
+      { name: "long_metrics.brand", desc: false },
+      { name: "__lookbase_lvl_0", desc: true },
+      { name: "$$$_index_$$$", desc: false },
+      { name: "long_metrics.region_seg", desc: false },
+      { name: "Current|long_metrics.total_sale_price", desc: true },
+    ];
+    expect(filterOutHierarchyClientSorts(rawSorts, customDims)).toEqual([
+      { name: "Current|long_metrics.total_sale_price", desc: true },
+    ]);
   });
 });
 
